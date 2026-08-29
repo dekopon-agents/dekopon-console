@@ -232,7 +232,7 @@ pub async fn connect(
         source,
     };
     let client =
-        BrokerClient::new(socket.path(), server_uid, options.frame_limits).map_err(&no_broker)?;
+        BrokerClient::new(socket.path(), server_uid, options.frame_limits).map_err(no_broker)?;
     client.capabilities().await.map_err(no_broker)?;
     Ok((client, socket))
 }
