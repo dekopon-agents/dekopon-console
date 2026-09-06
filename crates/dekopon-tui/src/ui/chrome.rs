@@ -20,7 +20,12 @@ pub fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             Style::default().fg(Theme::FORGOTTEN)
         };
-        spans.push(Span::styled(format!(" {} ", pane.title()), style));
+        let title = if pane == Pane::Turns && !app.turns_enabled() {
+            "turns (disabled)"
+        } else {
+            pane.title()
+        };
+        spans.push(Span::styled(format!(" {title} "), style));
         spans.push(Span::raw(" "));
     }
     if app.busy {

@@ -4,7 +4,7 @@
 //! Everything after that — connecting, authenticating, drawing, running turns — is `dekopon-tui`.
 //!
 //! It is an ordinary unprivileged client of `dekopon-brokerd`'s Unix socket. It holds a model
-//! credential and nothing else: no policy, no provider credential, no authorization. Every
+//! credential in turn mode and nothing else: no policy, no provider credential, no authorization. Every
 //! capability call it makes is a proposal the broker alone decides.
 
 #![forbid(unsafe_code)]
@@ -39,6 +39,10 @@ use tracing_subscriber::EnvFilter;
     long_about = None
 )]
 struct Cli {
+    /// Use the existing broker shell without any model or credential setup. Turns stay disabled.
+    #[arg(long, conflicts_with_all = ["chat_socket", "auth_file", "endpoint", "api_key_env", "model"])]
+    shell: bool,
+
     /// Development-only dekopond local socket (0600). Skips catalog and model setup.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["socket", "server_uid", "config", "auth_file", "endpoint", "api_key_env"])]
     chat_socket: Option<PathBuf>,
@@ -209,19 +213,24 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
     options.server_uid = cli.server_uid;
     options.prompt_limits.max_steps = cli.max_steps;
     options.prompt_limits.max_capability_calls = cli.max_capability_calls;
-    options.model_choice = match &cli.endpoint {
-        Some(endpoint) => ModelChoice::OpenAiCompatible {
-            endpoint: endpoint.clone(),
-            api_key_env: cli.api_key_env.clone(),
-        },
-        None => ModelChoice::ChatGptSubscription {
-            auth_file: cli.auth_file.clone(),
-        },
+    options.model_choice = if cli.shell {
+        ModelChoice::ShellOnly
+    } else {
+        match &cli.endpoint {
+            Some(endpoint) => ModelChoice::OpenAiCompatible {
+                endpoint: endpoint.clone(),
+                api_key_env: cli.api_key_env.clone(),
+            },
+            None => ModelChoice::ChatGptSubscription {
+                auth_file: cli.auth_file.clone(),
+            },
+        }
     };
 
     // Resolved before the screen opens, so the refusal an operator has to act on arrives as a line
     // on their terminal rather than inside a full-screen frame they then have to quit out of.
     let credential = match &options.model_choice {
+        ModelChoice::ShellOnly => String::new(),
         ModelChoice::ChatGptSubscription { auth_file } => {
             resolve_console_credential(auth_file.as_deref())?
                 .display()

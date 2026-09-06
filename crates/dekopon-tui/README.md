@@ -60,7 +60,7 @@ this console targets; until then it targets the released one.
 
 ## What it holds
 
-A model credential. That is the whole list: no policy, no provider credential, no authorization.
+In turn mode, a model credential. That is the whole list: no policy, no provider credential, no authorization.
 Sessions propose on behalf of an attested external subject and the broker decides every one.
 
 The credential file is `chatgpt-auth.console.json` rather than the `chatgpt-auth.json` every other
@@ -78,6 +78,13 @@ granted set as a model-authored script — so what is refused there is refused i
 reason. It shows the interpreter's own output rather than the structured call tree, because that
 tree is scoped to a turn and a typed line belongs to none. Interpreter state does not survive
 between lines, and the pane says so rather than leaving it to be discovered.
+
+With `ConsoleOptions.model_choice = ModelChoice::ShellOnly` (`dekopon-console --shell`),
+startup never resolves a model credential file or environment value and never constructs a model
+client. The existing agent picker opens this same shell. Turns are visibly disabled for the run,
+including submission and dispatch guards; changing panes or hopping agents cannot enable them.
+Restart in normal turn mode with its required model setup to use turns. The model choice carries
+no backend settings in shell-only mode, and the CLI rejects conflicting model flags.
 
 ## Two views of one conversation
 

@@ -17,7 +17,7 @@ is authorization.
 
 ## What it is, and what it is not
 
-It is an **unprivileged client of `dekopon-brokerd`'s Unix socket**. It holds a model credential and
+It is an **unprivileged client of `dekopon-brokerd`'s Unix socket**. In turn mode it holds a model credential and
 nothing else: no policy, no provider credential, no authorization, no component host. Every
 capability call it makes is a proposal, and the broker alone decides it.
 
@@ -48,6 +48,7 @@ native HTTP engine, after guest-header validation, where no client can observe t
 
 | Flag | Meaning |
 |---|---|
+| `--shell` | existing broker-backed shell only; no model credential setup, turns disabled |
 | `--subject <SUBJECT>` | canonical external subject sessions propose on behalf of; also `DEKOPON_CONSOLE_SUBJECT`. No default |
 | `--config <PATH>` | agent catalog; resolved the way `dekopon` resolves it when absent |
 | `--socket <PATH>` | broker socket; then `$DEKOPON_BROKER_SOCKET`, `$XDG_RUNTIME_DIR/dekopon/broker.sock`, `$HOME/.local/run/dekopon/broker.sock` |
@@ -107,3 +108,19 @@ including the JSON envelope and newline; exchanges time out after 120 seconds. F
 close the connection and require restarting chat; there is no automatic retry. Quitting or timing
 out does not cancel gateway work. `--conversation` defaults to `dev`; use a distinct value for a
 separate conversation, or intentionally reuse it to resume gateway-managed history.
+
+## Credential-free broker shell
+
+`dekopon-console --shell --subject dev.console.xavier --config /path/to/dekopon.yaml`
+opens the existing console without resolving a model credential path, opening a model credential
+file, reading a model-token environment variable, or constructing/contacting a model endpoint.
+The catalog and authenticated broker connection are still required. Select an agent and press
+Enter to hop into its shell; `i` composes, Enter runs, and Esc cancels composition. Each line uses
+the same sandboxed interpreter, limits, broker authorization and pipeline/exit rendering as the
+shell pane in normal turn mode. It adds no host shell, filesystem, environment or network access.
+
+The turns pane is visibly disabled. Switching panes or agents cannot enable turns: restart without
+`--shell` and configure the model normally to use them. Shell-only mode rejects `--model`,
+`--auth-file`, `--endpoint`, `--api-key-env`, and `--chat-socket` rather than accepting unused model
+settings. Normal turn startup still resolves and validates its model credential; development
+chat remains a separate gateway client with no local model setup.

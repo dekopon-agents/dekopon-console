@@ -265,3 +265,84 @@ fn chat_skips_catalog_and_credential_resolution() {
     );
     assert!(!stderr(&output).contains("credential"));
 }
+
+/// These negative-startup children must finish even if model setup accidentally blocks.
+fn bounded_output(command: &mut Command) -> std::process::Output {
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("console startup exceeded 5 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn shell_skips_the_shared_credential_guard_before_connecting() {
+    let (directory, path) = catalog();
+    let poison = directory.path().join("poison-auth.json");
+    std::fs::write(&poison, "not a model credential").unwrap();
+    for shell in [true, false] {
+        let mut command = binary();
+        command
+            .env("DEKOPON_CHATGPT_AUTH_FILE", &poison)
+            .args(["--config".as_ref(), path.as_os_str()])
+            .args([
+                "--subject",
+                "dev.console.xavier",
+                "--socket",
+                "/nonexistent/broker.sock",
+            ]);
+        if shell {
+            command.arg("--shell");
+        }
+        let output = bounded_output(&mut command);
+        assert_eq!(output.status.code(), Some(1));
+        let message = stderr(&output);
+        if shell {
+            assert!(message.contains("no broker found"), "{message}");
+            assert!(!message.contains("poison-auth"), "{message}");
+            assert!(!message.contains("credential"), "{message}");
+        } else {
+            assert!(message.contains("refusing to use"), "{message}");
+            assert!(message.contains("poison-auth"), "{message}");
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(poison).unwrap(),
+        "not a model credential"
+    );
+}
+
+#[test]
+fn shell_rejects_model_settings_and_chat_instead_of_resolving_them() {
+    for (flag, value) in [
+        ("--auth-file", "/nonexistent/auth.json"),
+        ("--endpoint", "not-a-url"),
+        ("--api-key-env", "DEKOPON_TEST_DO_NOT_READ"),
+        ("--model", "unused-model"),
+        ("--chat-socket", "/nonexistent/chat.sock"),
+    ] {
+        let output = bounded_output(binary().args(["--shell", flag, value]));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--shell"));
+        assert!(stderr(&output).contains(flag));
+    }
+    let output = bounded_output(binary().arg("--help"));
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).contains("--shell"));
+}

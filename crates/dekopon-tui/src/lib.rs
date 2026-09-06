@@ -13,7 +13,7 @@
 //! — is the only place those values can be observed, and observing them costs no change anywhere
 //! else in the workspace.
 //!
-//! It holds a model credential and nothing else. Every capability call is proposed to the broker on
+//! In turn mode it holds a model credential and nothing else. Every capability call is proposed to the broker on
 //! behalf of an attested subject, and the broker alone decides it.
 
 #![forbid(unsafe_code)]

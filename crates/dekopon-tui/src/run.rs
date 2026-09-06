@@ -28,7 +28,7 @@ use crate::{
     app::{App, Mode, Notice, Pane, ShellEntry},
     record::SessionEvent,
     session::{
-        AgentSession, ConsoleOptions, SessionError, StopFlag, build_model, open_agent,
+        AgentSession, ConsoleOptions, ModelChoice, SessionError, StopFlag, build_model, open_agent,
         session_channel,
     },
     ui,
@@ -102,8 +102,7 @@ pub async fn run(
     client: BrokerClient,
     options: ConsoleOptions,
 ) -> Result<(), ConsoleExit> {
-    let model: Arc<dyn ChatModel + Send + Sync> =
-        Arc::from(build_model(&options).map_err(ConsoleExit::Session)?);
+    let model = prepare_model(&mut app, &options).map_err(ConsoleExit::Session)?;
     let (_guard, mut terminal) = TerminalGuard::enter().map_err(ConsoleExit::Terminal)?;
 
     let stop = StopFlag::default();
@@ -140,6 +139,20 @@ pub async fn run(
                 }
             }
         }
+    }
+}
+
+/// Model setup is completed before taking the terminal, or excluded entirely for shell-only runs.
+fn prepare_model(
+    app: &mut App,
+    options: &ConsoleOptions,
+) -> Result<Option<Arc<dyn ChatModel + Send + Sync>>, SessionError> {
+    match options.model_choice {
+        ModelChoice::ShellOnly => {
+            app.restrict_to_shell();
+            Ok(None)
+        }
+        _ => build_model(options).map(|model| Some(Arc::from(model))),
     }
 }
 
@@ -210,7 +223,11 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
         KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
         KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
         KeyCode::Char('i') if matches!(app.pane, Pane::Turns | Pane::Shell) => {
-            app.mode = Mode::Composing;
+            if app.pane == Pane::Turns && !app.turns_enabled() {
+                app.notice = Some(Notice::refusal(SessionError::TurnsDisabled.to_string()));
+            } else {
+                app.mode = Mode::Composing;
+            }
         }
         KeyCode::Enter if app.pane == Pane::Agents => return Some(Action::Enter),
         // The turns pane's own cursor. `o` and `r` are the two keys the help overlay has always
@@ -265,7 +282,7 @@ async fn dispatch(
     action: Action,
     client: &BrokerClient,
     options: &ConsoleOptions,
-    model: &Arc<dyn ChatModel + Send + Sync>,
+    model: &Option<Arc<dyn ChatModel + Send + Sync>>,
     running: &mut Option<RunningTurn>,
     history: &mut History,
     stop: &StopFlag,
@@ -287,6 +304,11 @@ async fn dispatch(
             }
         }
         Action::Turn(prompt) => {
+            // Enforce at dispatch too: a crafted action must not bypass the UI restriction.
+            let Some(model) = model.as_ref().filter(|_| app.turns_enabled()) else {
+                app.notice = Some(Notice::refusal(SessionError::TurnsDisabled.to_string()));
+                return;
+            };
             let Some(session) = app.session.as_ref() else {
                 return;
             };

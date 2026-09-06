@@ -285,3 +285,23 @@ fn a_forgotten_turn_is_marked_as_outside_the_replay_window() {
         "the one thing no other surface can show must actually be drawn"
     );
 }
+
+#[test]
+fn shell_only_renders_disabled_turns_and_preserves_shell_exit_and_sanitization() {
+    let mut app = console(Vec::new());
+    app.restrict_to_shell();
+    app.pane = Pane::Shell;
+    app.push_shell(dekopon_tui::ShellEntry {
+        input: "echo safe | cat\u{1b}[2K".to_owned(),
+        output: "policy-denied\u{1b}[2J".to_owned(),
+        exit_code: 126,
+    });
+    let drawn = frame(&app);
+    assert!(drawn.contains("turns (disabled)"));
+    assert!(drawn.contains("shell only (no model)"));
+    assert!(!drawn.contains("chatgpt-auth.console.json"));
+    assert!(drawn.contains("echo safe | cat"));
+    assert!(drawn.contains("policy-denied"));
+    assert!(drawn.contains("exit code: 126"));
+    assert!(!drawn.contains('\u{1b}'));
+}

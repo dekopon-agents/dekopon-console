@@ -10,7 +10,7 @@ use dekopon_protocol::Agent;
 use crate::{
     record::{CapabilityCall, SessionEvent},
     redact::redact,
-    session::AgentSession,
+    session::{AgentSession, SessionError},
     transcript::Transcript,
 };
 
@@ -167,6 +167,7 @@ impl RevealedField {
 
 /// The whole console.
 pub struct App {
+    turns_enabled: bool,
     /// Agents from the validated catalog, in catalog order.
     pub agents: Vec<Agent>,
     /// Index of the highlighted agent.
@@ -213,6 +214,7 @@ impl App {
         credential_path: String,
     ) -> Self {
         Self {
+            turns_enabled: true,
             agents,
             selected_agent: 0,
             session: None,
@@ -231,6 +233,18 @@ impl App {
             socket_path,
             subject,
         }
+    }
+
+    /// Permanently disables turns for this run. No key can enable model setup again.
+    pub fn restrict_to_shell(&mut self) {
+        self.turns_enabled = false;
+        self.credential_path = "shell only (no model)".to_owned();
+    }
+
+    /// Whether this run permits model turns (after normal credential setup).
+    #[must_use]
+    pub const fn turns_enabled(&self) -> bool {
+        self.turns_enabled
     }
 
     /// The highlighted agent, if the catalog has any.
@@ -373,7 +387,11 @@ impl App {
         self.expanded_call = None;
         self.selected_call = 0;
         self.revealed.clear();
-        self.pane = Pane::Detail;
+        self.pane = if self.turns_enabled {
+            Pane::Detail
+        } else {
+            Pane::Shell
+        };
     }
 
     /// Submits the composer as a turn, or explains why it could not.
@@ -381,6 +399,10 @@ impl App {
     /// Returns the prompt to run, so the caller can spawn the session; `None` means nothing was
     /// submitted and [`Self::notice`] says why.
     pub fn submit_turn(&mut self) -> Option<String> {
+        if !self.turns_enabled {
+            self.notice = Some(Notice::refusal(SessionError::TurnsDisabled.to_string()));
+            return None;
+        }
         if self.session.is_none() {
             self.notice = Some(Notice::refusal("hop into an agent first"));
             return None;

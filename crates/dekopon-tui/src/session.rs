@@ -1,7 +1,7 @@
 //! Connecting to the broker, choosing a model, and driving one bounded turn.
 //!
 //! The console is an unprivileged broker client that happens to run the loop itself. It holds a
-//! model credential and nothing else: no policy, no provider credential, no authorization. What a
+//! model credential in turn mode and nothing else: no policy, no provider credential, no authorization. What a
 //! session may do is whatever Cedar grants the attested subject through the selected agent, asked
 //! fresh on every hop.
 
@@ -58,6 +58,11 @@ const DEFAULT_MODEL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Failure setting up or running a console session.
 #[derive(Debug, Error)]
 pub enum SessionError {
+    /// Shell-only runs cannot start a model turn.
+    #[error(
+        "turns disabled in shell-only mode; restart without --shell and configure a model credential"
+    )]
+    TurnsDisabled,
     /// No discovery tier named a broker socket.
     #[error(
         "could not determine the broker socket path; pass --socket or set DEKOPON_BROKER_SOCKET"
@@ -102,6 +107,8 @@ pub enum SessionError {
 /// Which model backend a session talks to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelChoice {
+    /// Only the broker-backed shell; no model settings or credential discovery.
+    ShellOnly,
     /// The ChatGPT/Codex subscription, on a credential file of the console's own.
     ChatGptSubscription {
         /// Explicit path, or `None` to resolve [`CONSOLE_AUTH_FILE_NAME`].
@@ -336,6 +343,7 @@ pub fn build_model(
     options: &ConsoleOptions,
 ) -> Result<Box<dyn ChatModel + Send + Sync>, SessionError> {
     match &options.model_choice {
+        ModelChoice::ShellOnly => Err(SessionError::TurnsDisabled),
         ModelChoice::ChatGptSubscription { auth_file } => {
             let path = resolve_console_credential(auth_file.as_deref())?;
             Ok(Box::new(ChatGptCodexModel::new(
