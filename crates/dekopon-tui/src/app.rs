@@ -488,3 +488,6 @@ impl App {
 
 #[cfg(test)]
 mod tests;
+
+/// Development-only local chat state.
+pub mod chat;

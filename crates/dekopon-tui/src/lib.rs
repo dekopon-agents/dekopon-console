@@ -33,3 +33,6 @@ pub use session::{
     AgentSession, CONSOLE_AUTH_FILE_NAME, ConsoleOptions, ModelChoice, SessionError, StopFlag,
     TRACE_PREFIX,
 };
+
+/// Owner-only local transport client, with no model or credential resolution.
+pub mod chat;

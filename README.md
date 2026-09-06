@@ -90,3 +90,20 @@ subject instead.
 ## License
 
 Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.
+
+## Development gateway chat
+
+`dekopon-console --subject tel.15550100000 --chat-socket /path/to/local.sock --conversation my-chat`
+opens a text-only client of an already-running `dekopond` local transport. Chat skips catalog,
+broker-client, model and credential setup entirely. It sends one JSON request line and waits for
+one response; no tool loop runs in this mode. The socket must be same-owner 0600, with a same-UID
+peer and a parent not writable by other users. The UI always warns that the caller declares the
+subject: **development only**, not production authentication. The gateway still routes and the
+broker still authorizes it.
+
+Enter sends, Esc clears the composer, Ctrl-C quits. Only the latest reply is displayed, redacted
+and terminal-sanitized. Images are not displayed. Requests and replies are capped at 64 KiB
+including the JSON envelope and newline; exchanges time out after 120 seconds. Failed exchanges
+close the connection and require restarting chat; there is no automatic retry. Quitting or timing
+out does not cancel gateway work. `--conversation` defaults to `dev`; use a distinct value for a
+separate conversation, or intentionally reuse it to resume gateway-managed history.

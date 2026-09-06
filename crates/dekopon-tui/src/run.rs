@@ -44,6 +44,7 @@ impl TerminalGuard {
     /// Enters the alternate screen and installs a panic hook that leaves it.
     fn enter() -> io::Result<(Self, Terminal<CrosstermBackend<Stdout>>)> {
         enable_raw_mode()?;
+        let guard = Self;
         let mut stdout = io::stdout();
         // No mouse capture. Every mouse event this loop received was discarded, and capturing them
         // took the terminal's own text selection and scrollback away from the operator to do it —
@@ -58,7 +59,7 @@ impl TerminalGuard {
             previous(info);
         }));
 
-        Ok((Self, Terminal::new(CrosstermBackend::new(io::stdout()))?))
+        Ok((guard, Terminal::new(CrosstermBackend::new(io::stdout()))?))
     }
 }
 
@@ -352,4 +353,57 @@ pub enum ConsoleExit {
     /// Setting up the session layer failed before the console could open.
     #[error(transparent)]
     Session(SessionError),
+}
+
+/// Runs development chat using the same terminal restoration guard as the broker console.
+/// The connected client owns no model, catalog, or credential resolver.
+pub async fn run_chat(
+    mut client: crate::chat::ChatClient,
+    subject: String,
+    channel: String,
+) -> Result<(), ConsoleExit> {
+    let (_guard, mut terminal) = TerminalGuard::enter().map_err(ConsoleExit::Terminal)?;
+    let mut app = crate::app::chat::ChatApp::default();
+    let mut keys = EventStream::new();
+    loop {
+        terminal
+            .draw(|frame| app.draw(frame, &subject, &channel))
+            .map_err(ConsoleExit::Terminal)?;
+        if app.should_quit {
+            return Ok(());
+        }
+        match keys.next().await {
+            Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                if let Some(text) = app.on_key(key) {
+                    let reply = client.send(&text);
+                    tokio::pin!(reply);
+                    loop {
+                        terminal
+                            .draw(|frame| app.draw(frame, &subject, &channel))
+                            .map_err(ConsoleExit::Terminal)?;
+                        tokio::select! {
+                            result = &mut reply => {
+                                app.reply = result.unwrap_or_else(|error| error.to_string());
+                                app.busy = false;
+                                break;
+                            }
+                            key = keys.next() => match key {
+                                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                                    // Busy state prevents a second submission.
+                                    let _action = app.on_key(key);
+                                    if app.should_quit { return Ok(()); }
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(error)) => return Err(ConsoleExit::Terminal(error)),
+                                None => return Ok(()),
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(ConsoleExit::Terminal(error)),
+            None => return Ok(()),
+        }
+    }
 }

@@ -239,3 +239,29 @@ fn the_chatgpt_path_is_the_default_and_takes_the_credential_file_it_is_given() {
          {message}"
     );
 }
+
+#[test]
+fn chat_skips_catalog_and_credential_resolution() {
+    let output = binary()
+        .env(
+            "DEKOPON_CHATGPT_AUTH_FILE",
+            "/nonexistent/chatgpt-auth.json",
+        )
+        .args([
+            "--subject",
+            "tel.15550100000",
+            "--chat-socket",
+            "/nonexistent/chat.sock",
+            "--conversation",
+            "test-chat",
+        ])
+        .output()
+        .expect("binary starts");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("chat socket I/O failed"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stderr(&output).contains("credential"));
+}

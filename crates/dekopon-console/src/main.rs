@@ -39,6 +39,14 @@ use tracing_subscriber::EnvFilter;
     long_about = None
 )]
 struct Cli {
+    /// Development-only dekopond local socket (0600). Skips catalog and model setup.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["socket", "server_uid", "config", "auth_file", "endpoint", "api_key_env"])]
+    chat_socket: Option<PathBuf>,
+
+    /// Local chat conversation identity; reuse deliberately to resume gateway history.
+    #[arg(long, requires = "chat_socket", default_value = "dev")]
+    conversation: String,
+
     /// Path to a YAML or JSON agent catalog.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -108,6 +116,9 @@ const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 /// Failure opening or running the console.
 #[derive(Debug, Error)]
 enum ConsoleError {
+    /// The development transport refused the connection.
+    #[error(transparent)]
+    Chat(#[from] dekopon_tui::chat::ChatError),
     /// The catalog would not load.
     #[error(transparent)]
     Config(Box<dekopon_config::ConfigError>),
@@ -171,6 +182,23 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
     // operator fixes by finding a catalog, so reporting the catalog's absence ahead of it would
     // send them to the wrong problem.
     let subject = cli.subject.clone().ok_or(ConsoleError::NoSubject)?;
+    if let Some(socket) = &cli.chat_socket {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(ConsoleError::Runtime)?;
+        let client = runtime.block_on(dekopon_tui::chat::ChatClient::connect(
+            socket,
+            subject.clone(),
+            cli.conversation.clone(),
+        ))?;
+        runtime.block_on(dekopon_tui::run::run_chat(
+            client,
+            subject.to_string(),
+            cli.conversation.clone(),
+        ))?;
+        return Ok(());
+    }
     let catalog = load_discovered(cli.config.clone())
         .map_err(|error| ConsoleError::Config(Box::new(error)))?;
     let agents = catalog.agents().cloned().collect();
