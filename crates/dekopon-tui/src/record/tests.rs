@@ -1,13 +1,18 @@
 use std::time::Duration;
 
-use dekopon_agent::prompt::ScriptRuntime;
+use dekopon_agent::{
+    progress::{ProgressEvent, ProgressSink},
+    prompt::ScriptRuntime,
+};
 use dekopon_shell::{
     CapabilityCallResult, CapabilityDescription, CapabilityInvoker, ExitCode, ScriptOutcome,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-use super::{CallOutcome, RecordingInvoker, RecordingRuntime, Sequence, SessionEvent};
+use super::{
+    CallOutcome, RecordingInvoker, RecordingProgress, RecordingRuntime, Sequence, SessionEvent,
+};
 
 /// A leg that answers from a fixed table, so a test asserts on what the decorator reported rather
 /// than on what a broker happened to be doing.
@@ -22,11 +27,15 @@ impl CapabilityInvoker for FixedInvoker {
         (capability == "gh.issue.list").then(|| CapabilityDescription {
             capability: capability.to_owned(),
             description: "lists issues".to_owned(),
-            input_schema: json!({"type": "object"}),
         })
     }
 
-    fn invoke(&self, capability: &str, _input: Value) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        capability: &str,
+        _input: Value,
+        _secret_use: Option<dekopon_core::SecretUseProposal>,
+    ) -> CapabilityCallResult {
         match capability {
             "gh.issue.list" => CapabilityCallResult::Succeeded(json!([{"number": 7}])),
             "gh.pull-request.merge" => CapabilityCallResult::Denied {
@@ -45,9 +54,9 @@ struct FixedRuntime<'invoker> {
 impl ScriptRuntime for FixedRuntime<'_> {
     fn run_script(&self, _script: &str, _max_capability_calls: u32) -> ScriptOutcome {
         self.invoker
-            .invoke("gh.issue.list", json!({"state": "open"}));
+            .invoke("gh.issue.list", json!({"state": "open"}), None);
         self.invoker
-            .invoke("gh.pull-request.merge", json!({"number": 7}));
+            .invoke("gh.pull-request.merge", json!({"number": 7}), None);
         ScriptOutcome {
             output: "two calls\n".to_owned(),
             exit_code: ExitCode::SUCCESS,
@@ -68,6 +77,15 @@ fn drain(receiver: &mut UnboundedReceiver<SessionEvent>) -> Vec<SessionEvent> {
         events.push(event);
     }
     events
+}
+
+#[test]
+fn reports_bounded_model_progress_without_an_inference_payload() {
+    let (sender, mut receiver) = unbounded_channel();
+    RecordingProgress::new(sender).emit(ProgressEvent::ModelTurn { turn: 2, of: 8 });
+    assert!(
+        matches!(receiver.try_recv(), Ok(SessionEvent::Progress(message)) if message == "model turn 2/8")
+    );
 }
 
 #[test]
@@ -155,7 +173,7 @@ fn a_closed_console_does_not_stop_a_session() {
     // A call the broker has already accepted is not something an observer may abort, so a torn-down
     // console must not change the result the session sees.
     assert_eq!(
-        CallOutcome::from(&invoker.invoke("gh.issue.list", json!({}))),
+        CallOutcome::from(&invoker.invoke("gh.issue.list", json!({}), None)),
         CallOutcome::Succeeded(json!([{"number": 7}]))
     );
 }
@@ -172,7 +190,7 @@ fn outcome_labels_are_stable() {
 fn elapsed_is_measured_around_the_seam() {
     let (sender, mut receiver) = unbounded_channel();
     let invoker = RecordingInvoker::new(FixedInvoker, sender, Sequence::default());
-    invoker.invoke("gh.issue.list", json!({}));
+    invoker.invoke("gh.issue.list", json!({}), None);
 
     let events = drain(&mut receiver);
     let SessionEvent::Capability(call) = &events[0] else {

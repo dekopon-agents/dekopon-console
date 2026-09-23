@@ -74,6 +74,8 @@ pub enum Mode {
     Browsing,
     /// Typing into the composer; keys are text.
     Composing,
+    /// A scoped claim needs explicit acknowledgement before broker connection.
+    ScopeWarning,
     /// The keybinding overlay is up.
     Help,
 }
@@ -201,6 +203,15 @@ pub struct App {
     pub socket_path: String,
     /// The canonical subject sessions propose on behalf of.
     pub subject: String,
+    /// Selected operator context and visible model routing.
+    pub profile: Option<String>,
+    pub scope_label: String,
+    pub model: String,
+    pub model_source: crate::session::ModelSource,
+    /// Current broker leg's W3C trace ID; turn legs adopt the console turn span.
+    pub broker_trace: Option<String>,
+    /// One-use acknowledgement of the requested-scope warning.
+    pub scope_warning_confirmed: bool,
 }
 
 impl App {
@@ -230,6 +241,12 @@ impl App {
             credential_path,
             socket_path,
             subject,
+            profile: None,
+            scope_label: "subject-only".into(),
+            model: String::new(),
+            model_source: crate::session::ModelSource::Default,
+            broker_trace: None,
+            scope_warning_confirmed: false,
         }
     }
 
@@ -356,6 +373,7 @@ impl App {
     /// one agent's tool calls under another agent's name would misattribute every one of them.
     pub fn enter(&mut self, session: AgentSession) {
         let agent = session.agent.clone();
+        self.broker_trace = Some(session.leg().session_trace().to_string());
         self.notice = Some(if session.is_empty() {
             Notice::refusal(format!(
                 "policy grants {} nothing through {agent}; the broker answered, it just said no",
@@ -383,6 +401,12 @@ impl App {
     pub fn submit_turn(&mut self) -> Option<String> {
         if self.session.is_none() {
             self.notice = Some(Notice::refusal("hop into an agent first"));
+            return None;
+        }
+        if self.session.as_ref().is_some_and(AgentSession::is_empty) {
+            self.notice = Some(Notice::refusal(
+                "broker grants no capabilities; no model request will be sent",
+            ));
             return None;
         }
         if self.busy {

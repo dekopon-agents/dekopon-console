@@ -23,16 +23,22 @@ dekopon-broker-protocol.workspace = true
 dekopon-core.workspace = true
 dekopon-model.workspace = true
 dekopon-protocol.workspace = true
+dekopon-process.workspace = true
 dekopon-shell.workspace = true
 futures-util.workspace = true
 ratatui.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+dekopon-config.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+dekopon-telemetry.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
 tempfile.workspace = true
 
 [lints]

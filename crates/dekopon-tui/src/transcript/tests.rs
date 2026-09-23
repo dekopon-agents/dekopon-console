@@ -37,6 +37,7 @@ fn answered(answer: &str) -> SessionEvent {
         model_turns: 2,
         script_calls: 1,
         capability_invocations: 2,
+        suggestions: Vec::new(),
     })))
 }
 
@@ -132,6 +133,7 @@ fn a_suppressed_reply_is_not_an_empty_answer() {
         model_turns: 1,
         script_calls: 0,
         capability_invocations: 0,
+        suggestions: Vec::new(),
     }))));
 
     assert_eq!(transcript.turns()[0].status, TurnStatus::Suppressed);

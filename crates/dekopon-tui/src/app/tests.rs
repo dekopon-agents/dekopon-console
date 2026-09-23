@@ -18,6 +18,7 @@ fn agent(name: &str) -> Agent {
             instructions: None,
             capabilities: Vec::new(),
             providers: Vec::new(),
+            skills: Vec::new(),
             model_class: None,
             policy_profile: None,
         },
@@ -28,7 +29,7 @@ fn agent(name: &str) -> Agent {
 fn console() -> App {
     App::new(
         vec![agent("ville-github"), agent("snooper")],
-        "dev.console.xavier".to_owned(),
+        "slack.t0123abc.u9xyz".to_owned(),
         "/run/dekopon/broker.sock".to_owned(),
         "/config/dekopon/chatgpt-auth.console.json".to_owned(),
     )
@@ -141,6 +142,7 @@ fn a_finished_session_clears_busy_and_closes_the_turn() {
         model_turns: 2,
         script_calls: 1,
         capability_invocations: 1,
+        suggestions: Vec::new(),
     }))));
     assert!(!app.busy);
     assert_eq!(app.transcript.turns().len(), 1);
@@ -173,6 +175,7 @@ fn completing_a_session_marks_the_replay_window() {
             model_turns: 1,
             script_calls: 0,
             capability_invocations: 0,
+            suggestions: Vec::new(),
         }))));
     }
     app.on_session_complete(2);

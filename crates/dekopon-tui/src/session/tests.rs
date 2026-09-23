@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::{
     CONSOLE_AUTH_FILE_NAME, NoDirect, SessionError, StopFlag, guard_shared_credential,
-    resolve_console_credential,
+    refuse_unpresented_assets, resolve_console_credential,
 };
 
 #[test]
@@ -100,13 +100,28 @@ fn the_empty_local_leg_claims_nothing() {
     assert!(direct.granted().is_empty());
     assert!(direct.command_words().is_empty());
     assert!(!direct.is_granted("gh.issue.list"));
-    assert!(!direct.grants_namespace("gh"));
     assert!(!direct.has_command_word("gh"));
     assert!(direct.describe("gh.issue.list").is_none());
     assert!(matches!(
-        direct.invoke("gh.issue.list", json!({})),
+        direct.invoke("gh.issue.list", json!({}), None),
         dekopon_shell::CapabilityCallResult::NotFound
     ));
+    let drn = dekopon_core::SecretUseProposal::HttpBearer {
+        secret: "drn:com.xrl:secret:prod:api/token".parse().unwrap(),
+    };
+    assert!(matches!(
+        direct.invoke("gh.issue.list", json!({}), Some(drn)),
+        dekopon_shell::CapabilityCallResult::Denied { .. }
+    ));
+}
+
+#[test]
+fn completed_asset_effect_is_not_reported_as_console_delivery() {
+    let output = json!({"result": {"image": "created"}, "assetNote": "[gateway: capability executed but this embedder has no asset store; received asset effects could not be retained or delivered; do not repeat the paid call]"});
+    let result = refuse_unpresented_assets(dekopon_shell::CapabilityCallResult::Succeeded(output));
+    assert!(
+        matches!(result, dekopon_shell::CapabilityCallResult::Failed { error, .. } if error.contains("effect executed") && error.contains("do not repeat"))
+    );
 }
 
 #[test]
@@ -115,7 +130,13 @@ fn the_stop_flag_latches_and_resets() {
 
     let stop = StopFlag::default();
     assert!(!stop.is_cancelled());
+    let (broker_handle, signal) = dekopon_process::CancelSignal::pair();
+    stop.bind_broker(broker_handle);
     stop.request();
+    assert!(
+        signal.is_cancelled(),
+        "Stop must reach the broker command leg"
+    );
     assert!(
         stop.is_cancelled(),
         "a requested stop must be visible to the loop"
@@ -141,7 +162,9 @@ async fn a_stopped_broker_is_refused_by_the_exact_path_that_was_tried() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let absent = directory.path().join("broker.sock");
     let mut options = super::ConsoleOptions::new(
-        "dev.console.xavier".parse().expect("valid subject fixture"),
+        "slack.t0123abc.u9xyz"
+            .parse()
+            .expect("valid subject fixture"),
         "test-model".to_owned(),
     );
     options.socket = Some(absent.clone());
