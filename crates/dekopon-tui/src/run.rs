@@ -134,13 +134,40 @@ pub async fn run(
         .await;
     }
 
+    drive_event_loop(
+        &mut terminal,
+        &mut app,
+        &client,
+        &mut options,
+        &mut keys,
+        &mut running,
+        &mut history,
+        &stop,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop owns the current terminal, inputs and cancellable session state together"
+)]
+async fn drive_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    client: &BrokerClient,
+    options: &mut ConsoleOptions,
+    keys: &mut EventStream,
+    running: &mut Option<RunningTurn>,
+    history: &mut History,
+    stop: &StopFlag,
+) -> Result<(), ConsoleExit> {
     loop {
-        if let Err(error) = terminal.draw(|frame| ui::draw(frame, &app)) {
-            stop_running(&mut running, &stop).await;
+        if let Err(error) = terminal.draw(|frame| ui::draw(frame, app)) {
+            stop_running(running, stop).await;
             return Err(ConsoleExit::Terminal(error));
         }
         if app.should_quit {
-            stop_running(&mut running, &stop).await;
+            stop_running(running, stop).await;
             return Ok(());
         }
 
@@ -149,21 +176,21 @@ pub async fn run(
         tokio::select! {
             key = keys.next() => match key {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    if let Some(action) = on_key(&mut app, key, &stop) {
-                        dispatch(&mut app, action, &client, &mut options, &mut running,
-                                 &mut history, &stop).await;
+                    if let Some(action) = on_key(app, key, stop) {
+                        dispatch(app, action, client, options, running,
+                                 history, stop).await;
                     }
                 }
                 Some(Ok(_)) => {}
-                Some(Err(error)) => { stop_running(&mut running, &stop).await; return Err(ConsoleExit::Terminal(error)); },
+                Some(Err(error)) => { stop_running(running, stop).await; return Err(ConsoleExit::Terminal(error)); },
                 None => { app.should_quit = true; },
             },
-            event = recv(&mut running) => {
+            event = recv(running) => {
                 match event {
                     Some(SessionEvent::Progress(message)) => app.notice = Some(Notice::info(message)),
                     Some(SessionEvent::ShellFinished(entry)) => app.push_shell(entry),
                     Some(event) => app.on_session_event(event),
-                    None => finish_turn(&mut app, &mut running, &mut history, &stop).await,
+                    None => finish_turn(app, running, history, stop).await,
                 }
             }
         }

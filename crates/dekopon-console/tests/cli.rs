@@ -153,7 +153,7 @@ fn a_subject_no_service_could_issue_is_refused_at_the_command_line() {
 }
 
 #[test]
-fn every_flag_together_reaches_the_broker_connection_rather_than_a_usage_error() {
+fn every_flag_together_passes_parsing_and_stops_at_the_tty_gate() {
     let (_directory, path) = catalog();
     let socket = Path::new("/nonexistent/dekopon/broker.sock");
     let output = binary()
@@ -190,12 +190,9 @@ fn every_flag_together_reaches_the_broker_connection_rather_than_a_usage_error()
 }
 
 #[test]
-fn the_chatgpt_path_is_the_default_and_takes_the_credential_file_it_is_given() {
-    // No `--endpoint`, so the subscription path runs and resolves a credential *before* the screen
-    // opens — the point of resolving it there is that a refusal reaches a plain terminal rather
-    // than a full-screen frame. An explicit `--auth-file` is accepted as written, which is the
-    // documented way out of the console's own `chatgpt-auth.console.json`, so this run gets past
-    // credential resolution and stops at the broker instead.
+fn explicit_chatgpt_auth_file_passes_parsing_and_stops_at_the_tty_gate() {
+    // Without --endpoint the subscription backend is selected. An explicit credential-file flag
+    // is valid, but the non-TTY check returns before any credential or broker is opened.
     let (_directory, path) = catalog();
     let socket = Path::new("/nonexistent/dekopon/broker.sock");
     let output = binary()
@@ -215,7 +212,7 @@ fn the_chatgpt_path_is_the_default_and_takes_the_credential_file_it_is_given() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         message.contains("TTY"),
-        "an explicit credential file is accepted before the interactive TTY gate: {message}"
+        "an explicit credential file passes parsing before the interactive TTY gate: {message}"
     );
 }
 
@@ -362,6 +359,208 @@ fn no_terminal_refuses_direct_selection_without_contacting_broker_or_model() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("TTY"), "{}", stderr(&output));
+}
+
+#[test]
+fn an_empty_catalog_refuses_before_terminal_or_model_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty.yaml");
+    std::fs::write(&empty, "").unwrap();
+    let output = binary()
+        .args(["--config".as_ref(), empty.as_os_str()])
+        .args(["--subject", "slack.t0123abc.u9xyz"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("configuration contains no resources"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct PtyBroker {
+    child: std::process::Child,
+    _dir: tempfile::TempDir,
+    socket: std::path::PathBuf,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for PtyBroker {
+    fn drop(&mut self) {
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pty_broker_fixture() -> Option<PtyBroker> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let broker = std::env::var_os("DEKOPON_TEST_BROKERD")?;
+    let wasm = std::env::var_os("DEKOPON_TEST_PROBE_WASM")?;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let component = dir.path().join("probe.wasm");
+    let policy = dir.path().join("policy.cedar");
+    let config = dir.path().join("broker.yaml");
+    let socket = dir.path().join("broker.sock");
+    for (path, bytes) in [
+        (&component, std::fs::read(wasm).unwrap()),
+        (&policy, br#"permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"agent.prompt", resource == Dekopon::Agent::"reviewer") when { context has via && context.via == "dekopon-console" };
+permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"cli-probe.upper", resource == Dekopon::Provider::"cli-probe") when { context has via && context.via == "dekopon-console" && context has agent && context.agent == "reviewer" };"#.to_vec()),
+    ] {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&config, format!("apiVersion: dekopon.dev/brokerd/v1alpha1\nsocketPath: {}\nbrokerPrincipal: local-broker\npolicyRevision: console-cli-test\npoliciesPath: {}\nproviders: [{}]\nidentities:\n  - uid: {}\n    principal: dekopon-console\n    actor: {{type: service, principal: dekopon-console}}\n    attestor:\n      namespaces: [slack.t0123abc]\nidentityMappings:\n  - subject: slack.t0123abc.u9xyz\n    principal: maintainer\nconstraintSets:\n  cli-probe.upper:\n    provider: cli-probe\n    effect: read-only\n    risk: Low\n    constraints: {{timeoutMs: 30000, maxOutputBytes: 65536}}\n", socket.display(), policy.display(), component.display(), rustix::process::geteuid().as_raw())).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let log = std::fs::File::create(dir.path().join("broker.log")).unwrap();
+    let mut child = Command::new(broker)
+        .arg("--config")
+        .arg(&config)
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    for _ in 0..300 {
+        if socket.exists() {
+            return Some(PtyBroker {
+                child,
+                _dir: dir,
+                socket,
+            });
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "broker startup {status}: {}",
+                std::fs::read_to_string(dir.path().join("broker.log")).unwrap()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("broker did not bind");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pty_console(socket: &Path, catalog: &Path, direct: bool) -> String {
+    use std::io::{Read as _, Write as _};
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    let capture = tempfile::tempdir().unwrap();
+    let transcript = capture.path().join("pty.log");
+    let mut cmd = Command::new("script");
+    #[cfg(target_os = "macos")]
+    cmd.args([
+        "-q",
+        transcript.to_str().unwrap(),
+        "sh",
+        "-c",
+        "stty cols 80 rows 24; exec \"$@\"",
+        "sh",
+        env!("CARGO_BIN_EXE_dekopon-console"),
+    ]);
+    #[cfg(target_os = "linux")]
+    {
+        let executable = env!("CARGO_BIN_EXE_dekopon-console").replace('\'', "'\\''");
+        let command = format!(
+            "stty cols 80 rows 24; exec '{executable}'{}",
+            if direct { " --agent reviewer" } else { "" }
+        );
+        cmd.args(["-q", "-c", &command, transcript.to_str().unwrap()]);
+    }
+    // Normal no-flag startup gets its catalog, socket and subject from discovery; no model
+    // request is made by the picker or by opening the exact agent's broker snapshot.
+    cmd.env("DEKOPON_CONFIG", catalog)
+        .env("DEKOPON_BROKER_SOCKET", socket)
+        .env("DEKOPON_CONSOLE_SUBJECT", "slack.t0123abc.u9xyz")
+        .env_remove("DEKOPON_CHATGPT_AUTH_FILE");
+    #[cfg(target_os = "macos")]
+    if direct {
+        cmd.args(["--agent", "reviewer"]);
+    }
+    let mut child = cmd
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&output);
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        while let Ok(count) = stdout.read(&mut chunk) {
+            if count == 0 {
+                break;
+            }
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    let expected = if direct { "reviewer:" } else { "picker" };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let observed = loop {
+        let text = output.lock().unwrap().clone();
+        let shown = String::from_utf8_lossy(&text);
+        if shown.contains(expected) {
+            break shown.into_owned();
+        }
+        if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            drop(child.kill());
+            drop(child.wait());
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!(
+                "PTY console did not display {expected}: {shown}; stderr: {stderr}; log: {}",
+                String::from_utf8_lossy(&std::fs::read(&transcript).unwrap_or_default())
+            );
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    child.stdin.take().unwrap().write_all(b"q").unwrap();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "PTY console exited {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            drop(child.wait());
+            panic!("console did not quit");
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    reader.join().unwrap();
+    observed
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn exact_agent_enters_real_broker_session_while_omitted_agent_stays_in_picker() {
+    let Some(fixture) = pty_broker_fixture() else {
+        eprintln!("broker fixture env absent; PTY integration not exercised");
+        return;
+    };
+    let (_dir, catalog) = catalog();
+    let direct = pty_console(&fixture.socket, &catalog, true);
+    assert!(
+        direct.contains("reviewer:")
+            && direct.contains("granted")
+            && direct.contains("cli-probe.upper"),
+        "direct selection did not open the broker leg"
+    );
+    let picker = pty_console(&fixture.socket, &catalog, false);
+    assert!(
+        !picker.contains("cli-probe.upper") && !picker.contains("reviewer:"),
+        "bare selection opened a leg without picker action"
+    );
 }
 
 #[test]
