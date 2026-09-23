@@ -25,7 +25,7 @@ use crate::app::{App, Mode, Pane};
 /// Draws the whole console for one frame.
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
     let [header, tabs, body, status] = Layout::vertical([
-        Constraint::Length(5),
+        Constraint::Length(6),
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),

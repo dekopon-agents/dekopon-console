@@ -21,7 +21,6 @@ tempfile = "3.27.0"
 thiserror = "2.0.19"
 tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "signal"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 # Exact crates.io versions of one Dekopon release, never path or git dependencies.
 #
@@ -38,6 +37,10 @@ dekopon-model = "=0.19.0"
 dekopon-protocol = { version = "=0.19.0", default-features = false }
 dekopon-process = "=0.19.0"
 dekopon-shell = "=0.19.0"
+dekopon-telemetry = "=0.19.0"
+opentelemetry_sdk = { version = "0.32.0", default-features = false, features = ["trace", "logs"] }
+opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
+prost = "0.14.3"
 dekopon-tui = { version = "0.11.1", path = "crates/dekopon-tui" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml_ng = "0.10.0"

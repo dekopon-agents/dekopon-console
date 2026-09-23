@@ -62,6 +62,7 @@ fn help_lists_every_flag_a_deployment_might_need() {
         "--profile",
         "--profiles",
         "--idle",
+        "--telemetry",
         "--socket",
         "--server-uid",
     ] {
@@ -567,6 +568,7 @@ fn exact_agent_enters_real_broker_session_while_omitted_agent_stays_in_picker() 
 fn idle_starts_without_a_catalog_or_model_and_exits_on_sigterm() {
     let mut child = binary()
         .arg("--idle")
+        .args(["--telemetry", "/nonexistent/ignored-by-idle.yaml"])
         .env("DEKOPON_BROKER_SOCKET", "/nonexistent/broker.sock")
         .spawn()
         .expect("idle process starts");
@@ -582,4 +584,27 @@ fn idle_starts_without_a_catalog_or_model_and_exits_on_sigterm() {
     assert!(signal.success(), "send SIGTERM");
     let status = child.wait().expect("SIGTERM exits idle");
     assert!(status.success(), "idle must exit gracefully: {status}");
+}
+
+#[test]
+fn invalid_telemetry_fails_before_startup_without_echoing_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("telemetry.yaml");
+    for text in [
+        "endpoint: http://user:synthetic-secret@localhost",
+        "endpoint: http://localhost\nheaders: synthetic-secret",
+        "endpoint: synthetic-secret\ntransport: invalid",
+    ] {
+        std::fs::write(&config, text).unwrap();
+        let output = binary()
+            .arg("--telemetry")
+            .arg(&config)
+            .arg("-vv")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(stdout(&output).is_empty());
+        assert!(stderr(&output).contains("telemetry"));
+        assert!(!stderr(&output).contains("synthetic-secret"));
+    }
 }

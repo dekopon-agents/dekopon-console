@@ -125,6 +125,39 @@ pub enum ModelChoice {
     },
 }
 
+/// Why this model was selected; retained independently of its display name.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ModelSource {
+    CliOverride,
+    Profile,
+    #[default]
+    Default,
+}
+
+impl ModelSource {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CliOverride => "CLI override",
+            Self::Profile => "profile",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// Fallback shared by startup and subsequent authored-profile selection.
+pub const DEFAULT_MODEL: &str = "gpt-5.6-luna";
+
+/// Resolve name and provenance together, on startup and every profile switch.
+#[must_use]
+pub fn selected_model(cli: Option<&str>, profile: Option<&str>) -> (String, ModelSource) {
+    match (cli, profile) {
+        (Some(model), _) => (model.into(), ModelSource::CliOverride),
+        (None, Some(model)) => (model.into(), ModelSource::Profile),
+        (None, None) => (DEFAULT_MODEL.into(), ModelSource::Default),
+    }
+}
+
 /// Everything a console run is configured with.
 #[derive(Clone, Debug)]
 pub struct ConsoleOptions {
@@ -154,6 +187,8 @@ pub struct ConsoleOptions {
     pub calls_override: Option<u32>,
     /// Model name handed to the backend.
     pub model: String,
+    /// Selection provenance displayed alongside the model name.
+    pub model_source: ModelSource,
     /// Which backend.
     pub model_choice: ModelChoice,
     /// Per-request model deadline.
@@ -185,6 +220,7 @@ impl ConsoleOptions {
             steps_override: None,
             calls_override: None,
             model,
+            model_source: ModelSource::Default,
             model_choice: ModelChoice::ChatGptSubscription { auth_file: None },
             model_timeout: DEFAULT_MODEL_TIMEOUT,
             prompt_limits: PromptLimits {
@@ -494,7 +530,10 @@ pub async fn run_turn(
     progress: Arc<dyn ProgressSink>,
     events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
 ) -> Result<History, SessionError> {
+    // Tokio does not inherit tracing context on its blocking pool. Enter only on that thread.
+    let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
         let sequence = Sequence::default();
         let runtime = RecordingRuntime::new(
             ShellRuntime {

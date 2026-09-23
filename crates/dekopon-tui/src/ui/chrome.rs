@@ -19,7 +19,8 @@ pub fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map_or("picker", |session| session.agent.as_str());
     // A single overflowing line used to clip off the live-effects warning at 80 columns.
     // Keep that warning on its own first row; identity and scope have bounded separate rows.
-    let [warning, context, identity, scope] = Layout::vertical([
+    let [warning, model, context, identity, scope] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -27,9 +28,10 @@ pub fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ])
     .areas(area);
     for (row, label) in [
+        (warning, "LIVE PROVIDERS — effects are real".to_owned()),
         (
-            warning,
-            format!("LIVE PROVIDERS — effects are real · model: {}", app.model),
+            model,
+            format!("model ({}): {}", app.model_source.label(), app.model),
         ),
         (
             context,

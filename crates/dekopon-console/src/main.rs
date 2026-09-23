@@ -27,7 +27,7 @@ use dekopon_tui::{
 };
 use serde::Deserialize;
 use thiserror::Error;
-use tracing_subscriber::EnvFilter;
+mod telemetry;
 
 /// Connection, identity, and model settings for the console.
 ///
@@ -89,6 +89,10 @@ struct Cli {
     #[arg(long, value_name = "MODEL")]
     model: Option<String>,
 
+    /// Optional OTLP YAML configuration; ignored by --idle.
+    #[arg(long, value_name = "PATH")]
+    telemetry: Option<PathBuf>,
+
     /// Idle container PID1: wait for termination; no catalog, broker or model setup.
     #[arg(long, conflicts_with_all = ["config", "socket", "server_uid", "subject", "agent", "profile", "profiles", "model", "endpoint", "api_key_env", "auth_file", "max_steps", "max_capability_calls"])]
     idle: bool,
@@ -126,9 +130,6 @@ struct Cli {
     verbose: u8,
 }
 
-/// Model a console session talks to when nothing names one.
-const DEFAULT_MODEL: &str = "gpt-5.6-luna";
-
 /// Failure opening or running the console.
 #[derive(Debug, Error)]
 enum ConsoleError {
@@ -144,6 +145,8 @@ enum ConsoleError {
     /// The async runtime could not be built.
     #[error("could not start the console runtime")]
     Runtime(#[source] io::Error),
+    #[error(transparent)]
+    Telemetry(#[from] telemetry::TelemetryError),
     /// No subject was supplied.
     #[error(
         "no console identity: pass --subject <SUBJECT>, set DEKOPON_CONSOLE_SUBJECT, or select an authored --profile / defaultProfile; the broker must map the subject and authorize this console UID"
@@ -159,8 +162,7 @@ enum ConsoleError {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    initialize_tracing(cli.verbose, cli.no_color);
-    match if cli.idle { idle() } else { execute(&cli) } {
+    match if cli.idle { idle() } else { run_console(&cli) } {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -181,7 +183,7 @@ fn main() -> ExitCode {
 /// Returns before drawing anything when the catalog will not load, no broker is listening, or the
 /// credential guard refuses. Once the console is drawing, only a terminal failure comes back here:
 /// a refused hop or a failed session is something the console shows and stays open after.
-fn execute(cli: &Cli) -> Result<(), ConsoleError> {
+fn execute(cli: &Cli, runtime: &tokio::runtime::Runtime) -> Result<(), ConsoleError> {
     let document = match &cli.profiles {
         Some(path) => read_profiles(path)?,
         None => ProfilesDocument::default(),
@@ -266,13 +268,12 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
     }
     let agents = catalog.agents().cloned().collect();
 
-    let mut options = ConsoleOptions::new(
-        subject.clone(),
-        cli.model
-            .clone()
-            .or_else(|| initial.and_then(|p| p.model.clone()))
-            .unwrap_or_else(|| DEFAULT_MODEL.into()),
+    let (model, model_source) = dekopon_tui::session::selected_model(
+        cli.model.as_deref(),
+        initial.and_then(|p| p.model.as_deref()),
     );
+    let mut options = ConsoleOptions::new(subject.clone(), model);
+    options.model_source = model_source;
     options.scope = initial.and_then(|p| p.scope.clone());
     options.profiles = document.profiles.clone();
     options.skills = catalog
@@ -323,11 +324,6 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
     // The runtime comes up before the screen does, because connecting proves a broker is actually
     // answering and that refusal has to reach a plain terminal rather than a frame the operator
     // then has to quit out of.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(ConsoleError::Runtime)?;
-
     let (client, socket) = runtime.block_on(connect(&options))?;
     tracing::debug!(
         component = "dekopon-console",
@@ -355,6 +351,7 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
         .map(|s| serde_json::to_string(s).expect("typed scope serializes"))
         .unwrap_or_else(|| "subject-only".into());
     app.model = options.model.clone();
+    app.model_source = options.model_source;
     runtime.block_on(dekopon_tui::run(app, client, options))?;
     Ok(())
 }
@@ -429,27 +426,19 @@ fn idle() -> Result<(), ConsoleError> {
     })
 }
 
-/// Sends diagnostics to standard error, or to a sink when that is the screen this process is about
-/// to take over.
-///
-/// The alternate screen *is* the terminal, so a `tracing` line written to a terminal standard error
-/// lands inside a frame and stays until something overdraws it — and the operator's next action is
-/// then against a display that is no longer true. Redirecting standard error keeps every
-/// diagnostic and costs nothing: `dekopon-console -vv 2> console.log` works exactly as it reads.
-fn initialize_tracing(verbosity: u8, no_color: bool) {
-    let level = match verbosity {
-        0 => "warn",
-        1 => "info",
-        _ => "debug",
-    };
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(level))
-        .with_ansi(!no_color)
-        .with_target(verbosity > 1)
-        .without_time();
-    let _subscriber_result = if io::stderr().is_terminal() {
-        builder.with_writer(io::sink).try_init()
-    } else {
-        builder.with_writer(io::stderr).try_init()
-    };
+/// Exporters are created and drained while their runtime is alive, including startup refusals.
+fn run_console(cli: &Cli) -> Result<(), ConsoleError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(ConsoleError::Runtime)?;
+    let _entered = runtime.enter();
+    let telemetry = telemetry::initialize(cli.telemetry.as_deref(), cli.verbose, cli.no_color)?;
+    let result = execute(cli, &runtime);
+    let shutdown = telemetry
+        .shutdown()
+        .map_err(|_sensitive_error| telemetry::TelemetryError::Shutdown);
+    result?;
+    shutdown?;
+    Ok(())
 }

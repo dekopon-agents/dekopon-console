@@ -50,6 +50,15 @@ async fn broker(mapped: bool) -> Option<BrokerFixture> {
 }
 
 async fn broker_with_scope(mapped: bool, scoped_grant: bool, asset: bool) -> Option<BrokerFixture> {
+    broker_with_telemetry(mapped, scoped_grant, asset, None).await
+}
+
+async fn broker_with_telemetry(
+    mapped: bool,
+    scoped_grant: bool,
+    asset: bool,
+    endpoint: Option<&str>,
+) -> Option<BrokerFixture> {
     let binary = std::env::var_os("DEKOPON_TEST_BROKERD")?;
     let wasm = std::env::var_os(if asset {
         "DEKOPON_TEST_ASSET_WASM"
@@ -149,6 +158,11 @@ constraintSets:
             if mapped { uid } else { uid + 1 }
         ),
     );
+    if let Some(endpoint) = endpoint {
+        use std::io::Write as _;
+        let mut config = fs::OpenOptions::new().append(true).open(&config).unwrap();
+        writeln!(config, "telemetry:\n  endpoint: {endpoint}\n  transport: http\n  serviceName: console-broker-fixture\n  exportTimeoutMs: 5000").unwrap();
+    }
     let log = fs::File::create(dir.path().join("broker.log")).expect("log file");
     let mut child = Command::new(binary)
         .arg("--config")
@@ -243,7 +257,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
     for field in [
         "LIVE PROVIDERS",
         "effects are real",
-        "model: test-model",
+        "model (default): test-model",
         "agent: reviewer",
         "profile: operator",
         "subject: slack.t0123abc.u9xyz",
@@ -457,3 +471,6 @@ async fn real_broker_rejects_unmapped_peer_uid() {
         "unmapped peer cannot probe broker"
     );
 }
+
+#[path = "support/trace.rs"]
+mod trace;

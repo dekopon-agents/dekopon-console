@@ -207,7 +207,8 @@ pub struct App {
     pub profile: Option<String>,
     pub scope_label: String,
     pub model: String,
-    /// Broker leg's minted trace id, not a claim of full model/transport trace continuity.
+    pub model_source: crate::session::ModelSource,
+    /// Current broker leg's W3C trace ID; turn legs adopt the console turn span.
     pub broker_trace: Option<String>,
     /// One-use acknowledgement of the requested-scope warning.
     pub scope_warning_confirmed: bool,
@@ -243,6 +244,7 @@ impl App {
             profile: None,
             scope_label: "subject-only".into(),
             model: String::new(),
+            model_source: crate::session::ModelSource::Default,
             broker_trace: None,
             scope_warning_confirmed: false,
         }

@@ -556,6 +556,8 @@ async fn switching_profiles_clears_the_model_replay_and_visible_history() {
     .await;
     assert_eq!(app.profile.as_deref(), Some("second"));
     assert_eq!(app.subject, "slack.t0123abc.u8xyz");
+    assert_eq!(app.model_source, crate::session::ModelSource::Default);
+    assert_eq!(app.model, crate::session::DEFAULT_MODEL);
     assert!(
         history.is_empty(),
         "new profile must not replay the old subject's turns"
@@ -738,4 +740,72 @@ fn o_and_r_say_so_when_there_is_no_call_to_act_on() {
     app.notice = None;
     on_key(&mut app, press(KeyCode::Char('r')), &stop);
     assert!(app.notice.as_ref().is_some_and(|notice| notice.is_refusal));
+}
+
+#[tokio::test]
+async fn profile_switches_preserve_cli_override_and_update_model_provenance() {
+    use crate::session::{DEFAULT_MODEL, ModelSource};
+    let mut options = ConsoleOptions::new(
+        "slack.t0123abc.u9xyz".parse().unwrap(),
+        DEFAULT_MODEL.into(),
+    );
+    options.profiles.push(OperatorProfile {
+        name: "authored".into(),
+        agent: "reviewer".parse().unwrap(),
+        subject: options.subject.clone(),
+        scope: None,
+        model: Some("profile-model".into()),
+        max_steps: None,
+        max_capability_calls: None,
+    });
+    let mut app = console();
+    options.profiles[0].agent = app.agents[0].metadata.name.parse().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let client = BrokerClient::new(
+        directory.path().join("absent.sock"),
+        rustix::process::geteuid().as_raw(),
+        FrameLimits::default(),
+    )
+    .unwrap();
+    let mut history = History::new(options.history_limits);
+    let mut running = None;
+    for (cli, profile, expected, source) in [
+        (
+            Some("cli-model"),
+            Some("profile-model"),
+            "cli-model",
+            ModelSource::CliOverride,
+        ),
+        (
+            Some("cli-model"),
+            Some("other-profile-model"),
+            "cli-model",
+            ModelSource::CliOverride,
+        ),
+        (
+            None,
+            Some("other-profile-model"),
+            "other-profile-model",
+            ModelSource::Profile,
+        ),
+        (None, None, DEFAULT_MODEL, ModelSource::Default),
+    ] {
+        options.model_override = cli.map(str::to_owned);
+        options.profiles[0].model = profile.map(str::to_owned);
+        dispatch(
+            &mut app,
+            Action::Enter,
+            &client,
+            &mut options,
+            &mut running,
+            &mut history,
+            &StopFlag::default(),
+        )
+        .await;
+        assert_eq!((app.model.as_str(), app.model_source), (expected, source));
+        assert_eq!(
+            (options.model.as_str(), options.model_source),
+            (expected, source)
+        );
+    }
 }

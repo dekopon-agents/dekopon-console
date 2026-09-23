@@ -24,6 +24,7 @@ use dekopon_shell::Interpreter;
 use futures_util::StreamExt as _;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tracing::Instrument as _;
 
 use crate::{
     app::{App, Mode, Notice, Pane, ShellEntry},
@@ -350,6 +351,30 @@ async fn dispatch(
     history: &mut History,
     stop: &StopFlag,
 ) {
+    let span = match &action {
+        Action::Enter => tracing::Span::none(),
+        Action::Turn(_) => console_turn_span("model"),
+        Action::Shell(_) => console_turn_span("shell"),
+    };
+    dispatch_in_context(app, action, client, options, running, history, stop)
+        .instrument(span)
+        .await;
+}
+
+/// Each submitted turn owns a root, never the preceding turn's context.
+pub fn console_turn_span(kind: &'static str) -> tracing::Span {
+    tracing::info_span!(parent: None, "console.turn", console.origin = "dekopon-console", console.kind = kind)
+}
+
+async fn dispatch_in_context(
+    app: &mut App,
+    action: Action,
+    client: &BrokerClient,
+    options: &mut ConsoleOptions,
+    running: &mut Option<RunningTurn>,
+    history: &mut History,
+    stop: &StopFlag,
+) {
     match action {
         Action::Enter => {
             if app.busy {
@@ -392,11 +417,10 @@ async fn dispatch(
             {
                 options.subject = profile.subject.clone();
                 options.scope = profile.scope.clone();
-                options.model = options
-                    .model_override
-                    .clone()
-                    .or_else(|| profile.model.clone())
-                    .unwrap_or_else(|| "gpt-5.6-luna".into());
+                (options.model, options.model_source) = crate::session::selected_model(
+                    options.model_override.as_deref(),
+                    profile.model.as_deref(),
+                );
                 options.prompt_limits.max_steps =
                     options.steps_override.or(profile.max_steps).unwrap_or(8);
                 options.prompt_limits.max_capability_calls = options
@@ -420,6 +444,7 @@ async fn dispatch(
                 .map(|s| serde_json::to_string(s).expect("typed scope serializes"))
                 .unwrap_or_else(|| "subject-only".into());
             app.model = options.model.clone();
+            app.model_source = options.model_source;
             if options.scope.is_some() && !app.scope_warning_confirmed {
                 app.mode = Mode::ScopeWarning;
                 return;
@@ -482,8 +507,8 @@ async fn dispatch(
             stop.reset();
             let (handle_cancel, signal) = CancelSignal::pair();
             stop.bind_broker(handle_cancel);
-            let handle =
-                tokio::spawn(crate::session::run_turn(
+            let handle = tokio::spawn(
+                crate::session::run_turn(
                     Arc::new(leg.with_cancel_signal(signal).with_progress(
                         progress.clone(),
                         options.prompt_limits.max_capability_calls,
@@ -501,7 +526,9 @@ async fn dispatch(
                     stop.clone(),
                     progress,
                     sender,
-                ));
+                )
+                .in_current_span(),
+            );
             *running = Some(RunningTurn {
                 events: receiver,
                 handle,
@@ -547,10 +574,16 @@ async fn dispatch(
             stop.bind_broker(handle_cancel);
             app.busy = true;
             let previous = std::mem::replace(history, History::new(options.history_limits));
+            let span = tracing::Span::current();
             let handle = tokio::spawn(async move {
                 tokio::task::spawn_blocking(move || {
+                    let _entered = span.enter();
+                    let script = tracing::info_span!("console.script");
+                    let _script = script.enter();
+                    tracing::info!(target: "dekopon_tui::audit", script = line.as_str(), "console manual script");
                     let outcome = Interpreter::new(limits)
                         .run(&line, &LegHandle(Arc::new(leg.with_cancel_signal(signal))));
+                    tracing::info!(target: "dekopon_tui::audit", output = outcome.output.as_str(), exit_code = outcome.exit_code.get(), "console manual output");
                     if sender
                         .send(SessionEvent::ShellFinished(ShellEntry {
                             input: line,
@@ -565,7 +598,7 @@ async fn dispatch(
                 })
                 .await
                 .map_err(SessionError::Task)
-            });
+            }.in_current_span());
             *running = Some(RunningTurn {
                 events: receiver,
                 handle,

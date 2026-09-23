@@ -301,3 +301,40 @@ fn a_forgotten_turn_is_marked_as_outside_the_replay_window() {
         "the one thing no other surface can show must actually be drawn"
     );
 }
+
+#[test]
+fn selected_model_provenance_is_persistent_at_ordinary_widths() {
+    use dekopon_tui::session::{ModelSource, selected_model};
+    let mut app = console(Vec::new());
+    for width in [80, 100, 120] {
+        for (cli, profile, source) in [
+            (
+                Some("cli-model"),
+                Some("distinct-profile-model"),
+                ModelSource::CliOverride,
+            ),
+            (None, Some("profile-model"), ModelSource::Profile),
+            (None, None, ModelSource::Default),
+        ] {
+            (app.model, app.model_source) = selected_model(cli, profile);
+            for pane in Pane::ORDER {
+                app.pane = pane;
+                let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+                terminal.draw(|f| ui::draw(f, &app)).unwrap();
+                let drawn: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect();
+                assert!(
+                    drawn.contains(&format!("model ({}): {}", source.label(), app.model)),
+                    "{width}: {drawn}"
+                );
+                assert!(drawn.contains("LIVE PROVIDERS — effects are real"));
+                assert!(!drawn.contains("distinct-profile-model"));
+            }
+        }
+    }
+}

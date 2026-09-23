@@ -36,6 +36,9 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+dekopon-telemetry.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
 tempfile.workspace = true
 
 [lints]
