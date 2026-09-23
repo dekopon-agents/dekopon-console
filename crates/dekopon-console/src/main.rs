@@ -229,10 +229,9 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
                 None
             }
         });
-    if cli.subject.is_some() && initial.is_some() {
+    if cli.subject.is_some() && !document.profiles.is_empty() {
         return Err(ConsoleError::Profile(
-            "--subject cannot override a selected profile; remove defaultProfile or --subject"
-                .into(),
+            "--subject cannot be combined with authored --profiles; remove --subject or --profiles before opening the picker".into(),
         ));
     }
     if let (Some(agent), Some(profile)) = (&cli.agent, initial)

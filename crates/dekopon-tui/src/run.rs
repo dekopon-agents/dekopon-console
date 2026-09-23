@@ -16,7 +16,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use dekopon_agent::prompt::History;
+use dekopon_agent::prompt::{History, HistoryLimits};
 use dekopon_broker_protocol::BrokerClient;
 use dekopon_model::model::ChatModel;
 use dekopon_process::CancelSignal;
@@ -306,6 +306,14 @@ fn on_composing_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 #[cfg(test)]
 mod tests;
 
+fn clear_agent_context(app: &mut App, history: &mut History, limits: HistoryLimits) {
+    app.session = None;
+    app.broker_trace = None;
+    app.transcript = Default::default();
+    app.shell_history.clear();
+    *history = History::new(limits);
+}
+
 async fn dispatch(
     app: &mut App,
     action: Action,
@@ -377,11 +385,7 @@ async fn dispatch(
             }
             // A hop (including a refused hop or pending scope warning) must never leave
             // the prior agent usable under the newly selected subject/model.
-            app.session = None;
-            app.broker_trace = None;
-            app.transcript = Default::default();
-            app.shell_history.clear();
-            *history = History::new(options.history_limits);
+            clear_agent_context(app, history, options.history_limits);
             app.subject = options.subject.to_string();
             app.scope_label = options
                 .scope

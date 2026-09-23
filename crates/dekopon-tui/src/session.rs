@@ -580,7 +580,8 @@ pub async fn run_turn(
 ///
 /// `SessionInvoker` wants an owned `Box<dyn CapabilityInvoker + Send>` while the console keeps the
 /// leg for its shell pane, so this forwards through the `Arc` both hold.
-pub(crate) struct LegHandle(pub Arc<BrokerLeg>);
+#[doc(hidden)]
+pub struct LegHandle(pub Arc<BrokerLeg>);
 
 impl CapabilityInvoker for LegHandle {
     fn granted(&self) -> Vec<String> {

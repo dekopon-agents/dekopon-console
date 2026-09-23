@@ -1,14 +1,17 @@
 use std::{io::IsTerminal as _, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use dekopon_agent::prompt::{ConversationTurn, History};
+use dekopon_broker_protocol::{BrokerClient, FrameLimits};
 use dekopon_protocol::{Agent, AgentKind, AgentSpec, ApiVersion, ObjectMeta};
 use serde_json::json;
 
-use super::{Action, TerminalGuard, on_key};
+use super::{Action, TerminalGuard, dispatch, on_key};
 use crate::{
     app::{App, Mode, Pane, Payload},
+    profile::OperatorProfile,
     record::{CallOutcome, CapabilityCall, SessionEvent},
-    session::StopFlag,
+    session::{ConsoleOptions, StopFlag},
 };
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -57,6 +60,15 @@ fn terminal_guard_restores_after_normal_exit_and_panic_when_run_under_a_pty() {
     assert!(
         !crossterm::terminal::is_raw_mode_enabled().unwrap(),
         "normal exit restores raw mode"
+    );
+    let early_error = || -> std::io::Result<()> {
+        let (_guard, _terminal) = TerminalGuard::enter()?;
+        Err(std::io::Error::other("injected draw failure"))
+    };
+    assert!(early_error().is_err());
+    assert!(
+        !crossterm::terminal::is_raw_mode_enabled().unwrap(),
+        "error return restores raw mode"
     );
     let caught = std::panic::catch_unwind(|| {
         let (_guard, _terminal) = TerminalGuard::enter().expect("enter raw alternate screen");
@@ -179,6 +191,100 @@ fn escape_while_browsing_stops_a_running_turn() {
     on_key(&mut app, press(KeyCode::Esc), &stop);
     assert!(stop.is_requested());
     assert!(app.transcript.turns()[0].stop_requested);
+}
+
+#[test]
+fn cancellation_does_not_erase_an_effect_the_broker_already_accepted() {
+    let mut app = console();
+    app.busy = true;
+    app.transcript.open("perform action".into());
+    let stop = StopFlag::default();
+    let (handle, signal) = dekopon_process::CancelSignal::pair();
+    stop.bind_broker(handle);
+    on_key(&mut app, press(KeyCode::Esc), &stop);
+    assert!(signal.is_cancelled(), "Esc reaches the broker leg");
+    app.on_session_event(SessionEvent::ScriptStarted {
+        sequence: 0,
+        script: "probe action".into(),
+    });
+    app.on_session_event(SessionEvent::Capability(Box::new(CapabilityCall {
+        sequence: 1,
+        capability: "probe.action".into(),
+        input: json!({}),
+        outcome: CallOutcome::Succeeded(json!({"effect": "complete"})),
+        elapsed: Duration::from_millis(5),
+    })));
+    assert!(app.transcript.turns()[0].stop_requested);
+    assert!(
+        matches!(
+            app.transcript.turns()[0].scripts[0].calls[0].outcome,
+            CallOutcome::Succeeded(_)
+        ),
+        "accepted effects are still visible after a stop request"
+    );
+}
+
+#[tokio::test]
+async fn switching_profiles_clears_the_model_replay_and_visible_history() {
+    let first = "slack.t0123abc.u9xyz".parse().unwrap();
+    let second = "slack.t0123abc.u8xyz".parse().unwrap();
+    let mut options = ConsoleOptions::new(first, "test-model".into());
+    options.profiles.push(OperatorProfile {
+        name: "second".into(),
+        agent: "other".parse().unwrap(),
+        subject: second,
+        scope: None,
+        model: None,
+        max_steps: None,
+        max_capability_calls: None,
+    });
+    let mut history = History::new(options.history_limits);
+    history.record(ConversationTurn::completed(
+        "first profile secret",
+        "answer",
+    ));
+    let mut app = console();
+    let mut other = app.agents[0].clone();
+    other.metadata.name = "other".into();
+    app.agents.push(other);
+    app.selected_agent = 1;
+    app.profile = Some("first".into());
+    app.transcript.open("first profile secret".into());
+    app.shell_history.push(crate::app::ShellEntry {
+        input: "first profile shell".into(),
+        output: "secret".into(),
+        exit_code: 0,
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let client = BrokerClient::new(
+        directory.path().join("absent.sock"),
+        rustix::process::geteuid().as_raw(),
+        FrameLimits::default(),
+    )
+    .unwrap();
+    let mut running = None;
+    dispatch(
+        &mut app,
+        Action::Enter,
+        &client,
+        &mut options,
+        &mut running,
+        &mut history,
+        &StopFlag::default(),
+    )
+    .await;
+    assert_eq!(app.profile.as_deref(), Some("second"));
+    assert_eq!(app.subject, "slack.t0123abc.u8xyz");
+    assert!(
+        history.is_empty(),
+        "new profile must not replay the old subject's turns"
+    );
+    assert!(app.transcript.turns().is_empty());
+    assert!(app.shell_history.is_empty());
+    assert!(
+        app.session.is_none(),
+        "absent broker must refuse, not open a stale leg"
+    );
 }
 
 #[test]

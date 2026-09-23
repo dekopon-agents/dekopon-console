@@ -10,14 +10,16 @@ use dekopon_shell::{CapabilityCallResult, CapabilityInvoker as _, Interpreter, L
 use dekopon_tui::{
     App,
     record::{RecordingInvoker, Sequence, SessionEvent},
-    session::{AgentSession, ConsoleOptions, connect, open_agent},
+    session::{AgentSession, ConsoleOptions, LegHandle, connect, open_agent},
 };
+use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 use std::{
     fs,
     os::unix::fs::PermissionsExt as _,
     path::Path,
     process::{Child, Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir;
@@ -44,12 +46,16 @@ fn write_private(path: &Path, contents: impl AsRef<[u8]>) {
 }
 
 async fn broker(mapped: bool) -> Option<BrokerFixture> {
-    broker_with_scope(mapped, true).await
+    broker_with_scope(mapped, true, false).await
 }
 
-async fn broker_with_scope(mapped: bool, scoped_grant: bool) -> Option<BrokerFixture> {
+async fn broker_with_scope(mapped: bool, scoped_grant: bool, asset: bool) -> Option<BrokerFixture> {
     let binary = std::env::var_os("DEKOPON_TEST_BROKERD")?;
-    let wasm = std::env::var_os("DEKOPON_TEST_PROBE_WASM")?;
+    let wasm = std::env::var_os(if asset {
+        "DEKOPON_TEST_ASSET_WASM"
+    } else {
+        "DEKOPON_TEST_PROBE_WASM"
+    })?;
     let dir = tempfile::tempdir().expect("fixture directory");
     fs::set_permissions(
         dir.path(),
@@ -70,8 +76,41 @@ when { context has via && context.via == "dekopon-console" };
 @id("console-read")
 permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"cli-probe.upper", resource == Dekopon::Provider::"cli-probe")
 when { context has via && context.via == "dekopon-console" && context has agent && context.agent == "reviewer" };
+@id("console-asset")
+permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"http-probe.purge", resource == Dekopon::Provider::"http-probe")
+when { context has via && context.via == "dekopon-console" && context has agent && context.agent == "reviewer" };
 "#);
     let config = dir.path().join("broker.yaml");
+    let assets_root = dir
+        .path()
+        .canonicalize()
+        .expect("canonical fixture path")
+        .join("assets");
+    if asset {
+        fs::create_dir(&assets_root).expect("assets directory");
+        fs::set_permissions(&assets_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let asset_config = if asset {
+        format!(
+            "assets:\n  rootPath: {}\n  maxInFlightBytes: 1048576\n",
+            assets_root.display()
+        )
+    } else {
+        String::new()
+    };
+    let capability = if asset {
+        "http-probe.purge"
+    } else {
+        "cli-probe.upper"
+    };
+    let provider = if asset { "http-probe" } else { "cli-probe" };
+    let constraints = if asset {
+        "{timeoutMs: 30000, maxOutputBytes: 65536, asset: {attach: true, send: true, remove: false}}"
+    } else {
+        "{timeoutMs: 30000, maxOutputBytes: 65536}"
+    };
+    let effect = if asset { "external-write" } else { "read-only" };
+    let risk = if asset { "High" } else { "Low" };
     let uid = rustix::process::geteuid().as_raw();
     let chat_scopes = if scoped_grant {
         "chatScopes:\n        - kind: slack\n          transport: operator\n          conversation: {kind: [directMessage], ids: [d0123abc]}"
@@ -82,7 +121,7 @@ when { context has via && context.via == "dekopon-console" && context has agent 
         &config,
         format!(
             r#"apiVersion: dekopon.dev/brokerd/v1alpha1
-socketPath: {}
+{asset_config}socketPath: {}
 brokerPrincipal: local-broker
 policyRevision: console-test
 policiesPath: {}
@@ -98,11 +137,11 @@ identityMappings:
   - subject: slack.t0123abc.u9xyz
     principal: maintainer
 constraintSets:
-  cli-probe.upper:
-    provider: cli-probe
-    effect: read-only
-    risk: Low
-    constraints: {{timeoutMs: 30000, maxOutputBytes: 65536}}
+  {capability}:
+    provider: {provider}
+    effect: {effect}
+    risk: {risk}
+    constraints: {constraints}
 "#,
             socket.display(),
             policy.display(),
@@ -176,6 +215,46 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         second.session_trace(),
         "new broker legs do not reuse a session trace"
     );
+    let mut app = App::new(
+        vec![],
+        subject.to_string(),
+        fixture.socket.display().to_string(),
+        "auth-file".into(),
+    );
+    app.profile = Some("operator".into());
+    app.scope_label = "subject-only".into();
+    app.model = "test-model".into();
+    app.enter(AgentSession::new(
+        "reviewer".parse().unwrap(),
+        second,
+        Default::default(),
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| dekopon_tui::ui::draw(frame, &app))
+        .unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    for field in [
+        "LIVE PROVIDERS",
+        "effects are real",
+        "model: test-model",
+        "agent: reviewer",
+        "profile: operator",
+        "subject: slack.t0123abc.u9xyz",
+        "console: dekopon-console",
+        "REQUESTED scope: subject-only",
+    ] {
+        assert!(
+            rendered.contains(field),
+            "80-column entered session hides {field}"
+        );
+    }
     tokio::task::spawn_blocking(move || {
         let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let recorded = RecordingInvoker::new(allowed, events, Sequence::default());
@@ -304,8 +383,39 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
 }
 
 #[tokio::test]
+async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors() {
+    // Run only with the separately supplied latest-main asset fixture; the published 0.19.0
+    // probe broker test above does not imply support for unpublished broker model APIs.
+    let Some(fixture) = broker_with_scope(true, true, true).await else {
+        eprintln!("asset fixture env absent; integration not exercised");
+        return;
+    };
+    let assets_root = fixture._dir.path().join("assets");
+    let subject = "slack.t0123abc.u9xyz".parse().unwrap();
+    let mut options = ConsoleOptions::new(subject, "unused".into());
+    options.socket = Some(fixture.socket.clone());
+    options.server_uid = Some(rustix::process::geteuid().as_raw());
+    let (client, _) = connect(&options).await.unwrap();
+    let leg = open_agent(client, options.subject, "reviewer".parse().unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(leg.effective_capabilities().len(), 1);
+    tokio::task::spawn_blocking(move || {
+        let invoker = LegHandle(Arc::new(leg));
+        let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
+        let before = descriptors();
+        for _ in 0..3 {
+            let outcome = invoker.invoke("http-probe.purge", json!({"assetMode": "attach"}), None);
+            assert!(matches!(outcome, CapabilityCallResult::Failed { ref error, .. } if error.contains("effect executed") && error.contains("do not repeat")), "asset was falsely delivered: {outcome:?}");
+            assert_eq!(fs::read_dir(&assets_root).unwrap().count(), 0, "assets must be unlinked after output");
+        }
+        assert_eq!(descriptors(), before, "completed effects left descriptors open");
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn empty_chat_scopes_downgrades_a_requested_scope_without_echoing_it() {
-    let Some(fixture) = broker_with_scope(true, false).await else {
+    let Some(fixture) = broker_with_scope(true, false, false).await else {
         eprintln!("broker fixture env absent; integration not exercised");
         return;
     };

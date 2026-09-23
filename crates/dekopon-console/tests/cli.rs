@@ -254,6 +254,30 @@ fn explicit_profile_is_bound_to_its_agent() {
 }
 
 #[test]
+fn explicit_subject_cannot_be_replaced_by_a_later_picker_profile() {
+    // Neither profile is selected at startup; without the conflict check a picker hop could
+    // silently replace the explicitly supplied subject with either authored identity.
+    let profiles_text = "profiles:\n  - name: first\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n  - name: second\n    agent: other\n    subject: slack.t0123abc.u8xyz\n";
+    let (_dir, catalog, profiles) = profile_fixture(profiles_text);
+    let output = binary()
+        .args(["--config".as_ref(), catalog.as_os_str()])
+        .args(["--profiles".as_ref(), profiles.as_os_str()])
+        .args(["--subject", "slack.t0123abc.u7xyz"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("--subject") && message.contains("--profiles"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("TTY"),
+        "must refuse before opening the picker: {message}"
+    );
+}
+
+#[test]
 fn ambiguous_profiles_never_select_the_first_identity() {
     let duplicate = format!(
         "{}  - name: second\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n",

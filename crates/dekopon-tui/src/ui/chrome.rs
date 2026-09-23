@@ -17,15 +17,42 @@ pub fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .session
         .as_ref()
         .map_or("picker", |session| session.agent.as_str());
-    let label = format!(
-        "agent: {agent} · profile: {} · subject: {} · console: dekopon-console (uid {}) · REQUESTED scope: {} · model: {} · LIVE PROVIDERS — effects are real",
-        app.profile.as_deref().unwrap_or("subject-only"),
-        app.subject,
-        rustix::process::geteuid().as_raw(),
-        app.scope_label,
-        app.model
-    );
-    frame.render_widget(Paragraph::new(crate::redact::sanitize_line(&label)), area);
+    // A single overflowing line used to clip off the live-effects warning at 80 columns.
+    // Keep that warning on its own first row; identity and scope have bounded separate rows.
+    let [warning, context, identity, scope] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+    ])
+    .areas(area);
+    for (row, label) in [
+        (
+            warning,
+            format!("LIVE PROVIDERS — effects are real · model: {}", app.model),
+        ),
+        (
+            context,
+            format!(
+                "agent: {agent} · profile: {}",
+                app.profile.as_deref().unwrap_or("subject-only")
+            ),
+        ),
+        (
+            identity,
+            format!(
+                "subject: {} · console: dekopon-console (uid {})",
+                app.subject,
+                rustix::process::geteuid().as_raw()
+            ),
+        ),
+        (scope, format!("REQUESTED scope: {}", app.scope_label)),
+    ] {
+        frame.render_widget(
+            Paragraph::new(crate::redact::sanitize_line(&label)).wrap(Wrap { trim: true }),
+            row,
+        );
+    }
 }
 
 /// Draws the pane tabs.
