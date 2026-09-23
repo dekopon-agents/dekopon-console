@@ -1,10 +1,10 @@
-use std::time::Duration;
+use std::{io::IsTerminal as _, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use dekopon_protocol::{Agent, AgentKind, AgentSpec, ApiVersion, ObjectMeta};
 use serde_json::json;
 
-use super::{Action, on_key};
+use super::{Action, TerminalGuard, on_key};
 use crate::{
     app::{App, Mode, Pane, Payload},
     record::{CallOutcome, CapabilityCall, SessionEvent},
@@ -31,6 +31,7 @@ fn console() -> App {
             instructions: None,
             capabilities: Vec::new(),
             providers: Vec::new(),
+            skills: Vec::new(),
             model_class: None,
             policy_profile: None,
         },
@@ -38,10 +39,50 @@ fn console() -> App {
     };
     App::new(
         vec![agent],
-        "dev.console.xavier".to_owned(),
+        "slack.t0123abc.u9xyz".to_owned(),
         "/run/dekopon/broker.sock".to_owned(),
         "/config/dekopon/chatgpt-auth.console.json".to_owned(),
     )
+}
+
+#[test]
+fn terminal_guard_restores_after_normal_exit_and_panic_when_run_under_a_pty() {
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    {
+        let (_guard, _terminal) = TerminalGuard::enter().expect("enter raw alternate screen");
+        assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+    }
+    assert!(
+        !crossterm::terminal::is_raw_mode_enabled().unwrap(),
+        "normal exit restores raw mode"
+    );
+    let caught = std::panic::catch_unwind(|| {
+        let (_guard, _terminal) = TerminalGuard::enter().expect("enter raw alternate screen");
+        panic!("injected terminal panic");
+    });
+    assert!(caught.is_err());
+    assert!(
+        !crossterm::terminal::is_raw_mode_enabled().unwrap(),
+        "panic restores raw mode"
+    );
+}
+
+#[test]
+fn scoped_claim_requires_an_explicit_confirmation_before_enter() {
+    let mut app = console();
+    app.mode = Mode::ScopeWarning;
+    let stop = StopFlag::default();
+    assert_eq!(on_key(&mut app, press(KeyCode::Char('q')), &stop), None);
+    assert!(!app.scope_warning_confirmed);
+    assert!(!app.should_quit);
+    app.mode = Mode::ScopeWarning;
+    assert_eq!(
+        on_key(&mut app, press(KeyCode::Enter), &stop),
+        Some(Action::Enter)
+    );
+    assert!(app.scope_warning_confirmed);
 }
 
 #[test]
@@ -138,6 +179,20 @@ fn escape_while_browsing_stops_a_running_turn() {
     on_key(&mut app, press(KeyCode::Esc), &stop);
     assert!(stop.is_requested());
     assert!(app.transcript.turns()[0].stop_requested);
+}
+
+#[test]
+fn escape_stops_a_manual_shell_command_without_an_open_model_turn() {
+    let mut app = console();
+    let stop = StopFlag::default();
+    app.busy = true;
+    on_key(&mut app, press(KeyCode::Esc), &stop);
+    assert!(stop.is_requested());
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("not") || notice.text.contains("complete"))
+    );
 }
 
 #[test]

@@ -1,92 +1,52 @@
 # dekopon-console
 
-An interactive terminal view over a running [Dekopon](https://github.com/dekopon-agents/dekopon)
-broker. Pick an agent, see what policy actually grants it, type a turn, and watch every capability
-call go out with its arguments and its result.
+An operator-controlled interactive client of `dekopon-brokerd`. This branch implements the console session milestone, **not** packaging, chart enablement, or deployment. The broker alone maps subjects, authenticates the Unix peer UID, checks `agent.prompt` and provider grants, and holds provider credentials. Whoever can exec arbitrary code as the console UID can claim any subject/scope inside its broker attestor envelope; the profile picker is convenience, not authorization or Kubernetes user attribution.
 
-```console
-cargo install --locked dekopon-console
-dekopon-console --subject dev.console.xavier
+## Run
+
+```sh
+dekopon-console --config /config/dekopon.yaml --profiles /config/console-profiles.yaml \
+  --socket /run/dekopon/broker.sock --server-uid 65532
+# exact catalog name plus an authored matching profile
+dekopon-console --config /config/dekopon.yaml --profiles /config/console-profiles.yaml \
+  --profile family-channel --agent lange-family --server-uid 65532
+# explicitly subject-only, for a separately authorized deployment
+dekopon-console --subject slack.t0123abc.u9xyz --agent reviewer --server-uid 65532
+# separate idle PID1; no catalog, broker, model, or credential setup
+dekopon-console --idle
 ```
 
-It moved out of the dekopon tree the way
-[dekopon-provider-gh](https://github.com/dekopon-agents/dekopon-provider-gh) did, and for the same
-reason: it is an ordinary client of published crates, not part of the control plane. Taking it out
-dropped a TUI framework and five duplicate-version dependency exemptions from a repository whose job
-is authorization.
+Interactive commands need stdin/stdout TTY (`kubectl exec -it`). A missing broker, incorrect server UID, refused peer/agent, unknown agent, missing profile, ambiguous same-agent profiles, or absent TTY fails clearly. The picker still shows every catalog agent; selecting one with no matching profile refuses rather than borrowing another agent's identity. An empty broker surface and a failed fresh `agent.prompt` gate prevent model inference. An idle process never makes a model or broker request.
 
-## What it is, and what it is not
+### Authored profiles
 
-It is an **unprivileged client of `dekopon-brokerd`'s Unix socket**. It holds a model credential and
-nothing else: no policy, no provider credential, no authorization, no component host. Every
-capability call it makes is a proposal, and the broker alone decides it.
+This strict YAML or JSON document is **read-only, credential-free operator data**. Only `defaultProfile`, when explicitly present, selects the bare invocation's subject; bare launch still opens the picker. `--profile` selects a bound agent and may not be combined with `--subject`. `--agent` selects an exact catalog name; if multiple profiles bind it, pass `--profile`. A profile bound to another agent is a refusal. Without an authored default/selected profile, an explicit `--subject` (or `DEKOPON_CONSOLE_SUBJECT`) is required. Unknown keys, duplicate names, unknown catalog agents, invalid scope, zero or excessive limits refuse before broker/model setup. Profile names use ASCII letters/digits/`-`/`_`; `maxSteps` is 1–64 and `maxCapabilityCalls` is 1–256. CLI `--model`, `--max-steps`, `--max-capability-calls` override profile fields; then the fallback is model `gpt-5.6-luna`, 8 steps, 16 calls. The selected model is always visible in the header. Keep the full credential-free catalog and referenced skill paths available; the catalog loader refuses missing skills.
 
-It runs the agent loop itself, which is not a preference. The broker has no model client and no
-concept of a turn; in a deployment `dekopond` runs the loop and the broker authorizes what the loop
-reaches. This takes that gateway role for one operator at one terminal — and that is the only reason
-it can show a tool call's arguments and result at all. Conversation history keeps the prompt and the
-answer, `shell.command` spans keep an argument count, and the audit chain keeps digests. Those
-values exist nowhere but the process running the loop.
+```yaml
+defaultProfile: family-channel
+profiles:
+  - name: family-channel
+    agent: lange-family
+    subject: slack.t0123abc.u9xyz
+    scope: # exact published ChatScopeClaim shape; no parallel scope grammar
+      transport: operator
+      kind: slack
+      conversation: {kind: directMessage, container: t0123abc, id: d0123abc}
+    model: gpt-5.6-luna
+    maxSteps: 8
+    maxCapabilityCalls: 16
+```
 
-## Render-time redaction is a security property
+**Requested scope is not broker-confirmed.** The 0.19 broker wire does not echo authenticated chat scope; an attestor with empty `chatScopes` silently downgrades a scoped request to subject-only. The console displays an explicit confirmation before scoped entry and marks the header REQUESTED. A safe route-context deployment must configure **nonempty exact console `chatScopes` AND Cedar fail-closed for the console `via` whenever trusted transport/conversation is absent**, preferably an explicit forbid. Test that deleting `chatScopes` refuses `agent.prompt` and tools, and that mismatched conversations/agents/subjects refuse. All staged homelab profiles for this milestone must be concrete route-context profiles; subject-only mode remains for other deliberately authorized installations. Do not reuse the gateway's UID or spoof its `via`.
 
-Everything the console draws passes through `dekopon-tui`'s `redact` module before it reaches a
-buffer, and both halves of that matter:
+### Model and data limits
 
-- **Terminal-control sanitisation.** A pull-request title and an issue body are attacker-controlled
-  text arriving through a read-only capability. Drawn raw they can move the cursor, repaint earlier
-  lines, or reorder text through a bidirectional override. Nothing reaches a buffer another way.
-- **Per-field secret redaction.** What a model wrote or a provider returned can carry a token, and
-  a shape match hides only the run that matched so the sentence around it survives. Revealing is
-  one keystroke against one field — `r` uncovers the next hidden field of the call under the cursor
-  and says in the status line that it is now in your scrollback. It is never a mode.
+The published `=0.19.0` model clients support a private ChatGPT subscription `--auth-file` (`chatgpt-auth.console.json` by default), or `--endpoint URL` plus optional `--api-key-env NAME` for OpenAI-compatible endpoints. A named but absent/empty bearer variable refuses **when a model turn is attempted**, not while browsing. The console credential must not share the gateway's rotating refresh-token family; explicit `--auth-file` overrides the shared-file guard at the operator's risk. The chart should reference a separately owned API-key Secret or isolated subscription credential state, never mount broker/gateway credentials. No model is contacted for catalog browsing, empty grants or idle. `--server-uid` defaults to local effective UID only for same-owner development; the separate console UID 65535 / broker UID 65532 deployment must pass 65532 and have IPC group 65534, without write access to the socket parent.
 
-Provider credentials are not in this data by construction: the broker injects those inside its own
-native HTTP engine, after guest-header validation, where no client can observe them.
+The console uses the released shared prompt loop, mounted `read_skill`, safe `inspect_agent_config`, provider command words and help, progress metadata and cooperative broker-command cancellation. Stop reaches both the current model turn's broker command leg and a manual shell command, but does **not** undo effects already accepted. The capability pane shows the current broker-leg trace ID, not a proven end-to-end model/transport trace; one-trace export correlation still needs an authorized telemetry configuration and independent validation. Model arguments/results appear in local terminal panes; reveal can expose secrets into scrollback. Fresh agent entry resets transcript, shell state and model history. Manual scripts are Dekopon's bounded interpreter, not OS shell. It does not synthesize inbound delivery, chat replies, production transcript replay, or conversation memory. `suggest_improvement` is deliberately off (no authorized payload telemetry sink); model routing by core #321/OpenRouter is not present in published 0.19. Text-only console inputs have no local asset source; `chat-asset:<N>` proposals are refused before broker submission. On provider asset effects, core drops returned descriptors and reports a note; the console turns that outcome into an explicit **failed local presentation** warning after the effect executed, never reports fake delivery. Binary asset intake/presentation is a follow-up, not parity. This release must not be marketed as full image or transport replay.
 
-## Flags
+## Dependency / verification boundary
 
-| Flag | Meaning |
-|---|---|
-| `--subject <SUBJECT>` | canonical external subject sessions propose on behalf of; also `DEKOPON_CONSOLE_SUBJECT`. No default |
-| `--config <PATH>` | agent catalog; resolved the way `dekopon` resolves it when absent |
-| `--socket <PATH>` | broker socket; then `$DEKOPON_BROKER_SOCKET`, `$XDG_RUNTIME_DIR/dekopon/broker.sock`, `$HOME/.local/run/dekopon/broker.sock` |
-| `--server-uid <UID>` | trusted UID owning the broker process; defaults to the caller's own |
-| `--model <MODEL>` | model name handed to the backend |
-| `--auth-file <PATH>` | ChatGPT credential file; conflicts with `--endpoint` |
-| `--endpoint <URL>` | OpenAI-compatible endpoint instead of the ChatGPT subscription |
-| `--api-key-env <NAME>` | variable holding that endpoint's bearer token; requires `--endpoint` |
-| `--max-steps <COUNT>` | model turns one session may take |
-| `--max-capability-calls <COUNT>` | capability invocations one session may drive |
+Exact crates.io `=0.19.0` Dekopon pins, Rust 1.98.1, and committed Cargo.lock. Core main `e9800510980652498d5c4dff14bcf1a414ff215c` merged model API changes **after** published 0.19.0 without changing its workspace version. A new approved publication is required to adopt #321 model APIs; published 0.19.0 cannot substantiate #321 support. To exercise the broker boundary without live requests, set `DEKOPON_TEST_BROKERD` to a separately verified broker executable and `DEKOPON_TEST_PROBE_WASM` to core's pure `cli-probe-provider.wasm`, then run `cargo test -p dekopon-tui --test broker --locked`. The test skips only when those variables are absent; a submitted compatibility claim must provide them and record the artifact/ref tested. It tests attested/denied/empty surfaces, UID pin, chat-scope downgrade, scoped mismatch, provider help, pure read, ungranted call, and typed secret-use denial. For this milestone the same test also passed against a separately built broker from read-only core Git archive `e9800510980652498d5c4dff14bcf1a414ff215c` (broker binary SHA-256 `f7be0df04091a4f2688b3953d16cc299fded30580f75da9199b378cbc2ca9c23`) using the checked `cli-probe` component SHA-256 `091ca1a26e3fbb5aefef517c74e4f9635f2fbb05e4eafe21d5ccb2f42a66cba2`. This proves the tested broker wire/fixture paths, **not** unpublished #321 model API compatibility or untested provider effects. No path/git dependency is committed.
 
-`--subject` grants nothing by itself. The broker still needs an attestor grant covering that
-namespace and an owner-authored `identityMappings` entry, or it resolves to nothing.
-
-The console keeps its own `chatgpt-auth.console.json` rather than the `chatgpt-auth.json` every
-other surface resolves to. The refresh token rotates, so whichever process refreshes invalidates
-every other copy — including one exported into a secret store. Run
-`dekopon auth chatgpt login --auth-file <PATH>` once.
-
-## Version pinning
-
-Both crates depend on **exactly `=0.11.1`** of every dekopon crate they use, from crates.io. Not a
-caret range: these are pre-1.0, so `0.11.2` would be admitted automatically, and the broker protocol
-is a wire contract this console has not been run against. Not a git dependency either — the `gh`
-provider pinned a branch once, and a `branch =` dependency resolves by fetching the ref, so a
-deleted branch broke every cold-cache build.
-
-`dev.<surface>.<name>` subjects are part of that pin. Dekopon removed the `dev.*` subject service
-and the broker's `allowDevelopmentSubjects` opt-in when this console left its tree, so a broker
-built from dekopon `main` refuses one as an unknown service. Against such a broker, map an ordinary
-subject instead.
-
-## Layout
-
-- `crates/dekopon-tui` — the library: state machine, session driving, observation decorators,
-  redaction, panes. Published under the name it already had in the dekopon workspace, so its
-  crates.io lineage continues rather than restarting.
-- `crates/dekopon-console` — the binary: one command line, and nothing else.
-
-## License
-
-Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.
+The [`dekopon-tui` crate](crates/dekopon-tui/README.md) owns rendering, transcript, and terminal state. Copyright licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT).

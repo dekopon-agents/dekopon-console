@@ -122,7 +122,14 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Span::raw(sanitize_line(&session.command_words.join("  ")))
     };
     frame.render_widget(
-        Paragraph::new(Line::from(words)).block(
+        Paragraph::new(vec![
+            Line::from(words),
+            Line::from(format!(
+                "broker trace: {}",
+                app.broker_trace.as_deref().unwrap_or("not opened")
+            )),
+        ])
+        .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(" command words the bash tool will accept "),

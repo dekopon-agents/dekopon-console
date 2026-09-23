@@ -6,9 +6,10 @@
 //! fresh on every hop.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -16,27 +17,38 @@ use std::{
 
 use dekopon_agent::{
     BrokerLeg, BrokerLegError, SessionInvoker, ShellRuntime,
-    meta::EffectiveCapabilityView,
+    meta::{
+        AgentConfigView, EffectiveCapabilityView, MemoryConfigView, SessionConfigView, SkillView,
+    },
+    progress::ProgressSink,
     prompt::{
         CancellationProbe, History, HistoryLimits, PromptLimits, SessionInputs, run_prompt_session,
     },
 };
 use dekopon_broker_protocol::{
-    BrokerClient, BrokerSocketDiscovery, ClientError, FrameLimits, ResolvedBrokerSocket,
+    Attestation, BrokerClient, BrokerSocketDiscovery, ChatScopeClaim, ClientError, FrameLimits,
+    ResolvedBrokerSocket,
 };
-use dekopon_core::{AgentId, ExternalSubject};
+use dekopon_config::Skill;
+use dekopon_core::{AgentId, ExternalSubject, SecretUseProposal};
 use dekopon_model::{
     chatgpt::{self, ChatGptCodexModel, ChatGptError},
     model::{ChatModel, ModelError, OpenAiChatModel},
 };
+use dekopon_process::CancelHandle;
+use dekopon_protocol::Agent;
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, Limits as ShellLimits,
+    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandRun,
+    Limits as ShellLimits,
 };
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc::unbounded_channel;
 
-use crate::record::{RecordingInvoker, RecordingRuntime, RecordingUsage, Sequence, SessionEvent};
+use crate::{
+    profile::OperatorProfile,
+    record::{RecordingInvoker, RecordingRuntime, RecordingUsage, Sequence, SessionEvent},
+};
 
 /// Credential file the console resolves to when nothing else names one.
 ///
@@ -45,12 +57,6 @@ use crate::record::{RecordingInvoker, RecordingRuntime, RecordingUsage, Sequence
 /// cluster from an export of it, are all sitting on that one file. A console that shared it would
 /// take it over the first time it refreshed, and both ends would fail without saying why.
 pub const CONSOLE_AUTH_FILE_NAME: &str = "chatgpt-auth.console.json";
-
-/// Trace prefix every invocation this console makes carries.
-///
-/// It is the join key between what the console shows and what the broker's audit chain recorded, so
-/// a write can be found later by prefix rather than by timestamp.
-pub const TRACE_PREFIX: &str = "dekopon-console";
 
 /// Default wall-clock ceiling for one model request.
 const DEFAULT_MODEL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -94,6 +100,9 @@ pub enum SessionError {
     /// The OpenAI-compatible client refused.
     #[error(transparent)]
     Model(#[from] ModelError),
+    /// An explicitly configured API-key environment variable was absent or empty.
+    #[error("model credential variable {0} is absent or empty")]
+    MissingApiKey(String),
     /// The blocking task carrying the prompt loop did not finish.
     #[error("the session task did not complete")]
     Task(#[source] tokio::task::JoinError),
@@ -129,6 +138,20 @@ pub struct ConsoleOptions {
     pub frame_limits: FrameLimits,
     /// The canonical external subject sessions propose on behalf of.
     pub subject: ExternalSubject,
+    /// Authored route scope, never inferred from the agent or the terminal.
+    pub scope: Option<ChatScopeClaim>,
+    /// Validated operator contexts used when switching agents.
+    pub profiles: Vec<OperatorProfile>,
+    /// Already validated and bounded mounted skills for each agent.
+    pub skills: HashMap<AgentId, Vec<Skill>>,
+    /// Whether the initial context binds the console to one agent.
+    pub fixed_profile: Option<String>,
+    /// Requested exact agent, opened without a picker action.
+    pub initial_agent: Option<AgentId>,
+    /// Explicit CLI overrides, retained when hopping to another authored context.
+    pub model_override: Option<String>,
+    pub steps_override: Option<u32>,
+    pub calls_override: Option<u32>,
     /// Model name handed to the backend.
     pub model: String,
     /// Which backend.
@@ -153,6 +176,14 @@ impl ConsoleOptions {
             server_uid: None,
             frame_limits: FrameLimits::default(),
             subject,
+            scope: None,
+            profiles: Vec::new(),
+            skills: HashMap::new(),
+            fixed_profile: None,
+            initial_agent: None,
+            model_override: None,
+            steps_override: None,
+            calls_override: None,
             model,
             model_choice: ModelChoice::ChatGptSubscription { auth_file: None },
             model_timeout: DEFAULT_MODEL_TIMEOUT,
@@ -250,8 +281,13 @@ pub async fn open_agent(
     client: BrokerClient,
     subject: ExternalSubject,
     agent: AgentId,
+    scope: Option<ChatScopeClaim>,
 ) -> Result<BrokerLeg, SessionError> {
-    BrokerLeg::connect_attested(client, TRACE_PREFIX, subject, agent)
+    let attestation = match scope {
+        Some(scope) => Attestation::for_chat(subject, agent, scope),
+        None => Attestation::for_subject(subject, agent),
+    };
+    BrokerLeg::connect(client, Some(attestation))
         .await
         .map_err(SessionError::Leg)
 }
@@ -274,10 +310,6 @@ impl CapabilityInvoker for NoDirect {
         false
     }
 
-    fn grants_namespace(&self, _namespace: &str) -> bool {
-        false
-    }
-
     fn command_words(&self) -> Vec<String> {
         Vec::new()
     }
@@ -290,7 +322,15 @@ impl CapabilityInvoker for NoDirect {
         None
     }
 
-    fn invoke(&self, _capability: &str, _input: Value) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        _capability: &str,
+        _input: Value,
+        secret_use: Option<SecretUseProposal>,
+    ) -> CapabilityCallResult {
+        if secret_use.is_some() {
+            return dekopon_shell::secret_use_unsupported();
+        }
         CapabilityCallResult::NotFound
     }
 }
@@ -300,24 +340,38 @@ impl CapabilityInvoker for NoDirect {
 /// Cancellation is not rollback. It stops the next model turn or tool call from starting; a
 /// provider request the broker already accepted still finishes, and the console must say so rather
 /// than claim the turn was undone.
-#[derive(Clone, Debug, Default)]
-pub struct StopFlag(Arc<AtomicBool>);
+#[derive(Clone, Default)]
+pub struct StopFlag {
+    requested: Arc<AtomicBool>,
+    broker: Arc<Mutex<Option<CancelHandle>>>,
+}
 
 impl StopFlag {
     /// Requests a stop at the session's next cooperative boundary.
     pub fn request(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.requested.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.broker.lock().expect("stop lock").as_ref() {
+            handle.cancel();
+        }
     }
 
     /// Whether a stop has been requested.
     #[must_use]
     pub fn is_requested(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.requested.load(Ordering::Relaxed)
     }
 
     /// Clears the flag for the next session.
     pub fn reset(&self) {
-        self.0.store(false, Ordering::Relaxed);
+        self.requested.store(false, Ordering::Relaxed);
+        *self.broker.lock().expect("stop lock") = None;
+    }
+}
+
+impl StopFlag {
+    /// Binds Stop to the current broker leg as well as the model loop.
+    pub fn bind_broker(&self, handle: CancelHandle) {
+        *self.broker.lock().expect("stop lock") = Some(handle);
     }
 }
 
@@ -349,9 +403,14 @@ pub fn build_model(
             api_key_env,
         } => {
             let bearer = api_key_env
-                .as_deref()
-                .and_then(|name| std::env::var(name).ok())
-                .filter(|value| !value.is_empty());
+                .as_ref()
+                .map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| SessionError::MissingApiKey(name.clone()))
+                })
+                .transpose()?;
             Ok(Box::new(OpenAiChatModel::new(
                 endpoint,
                 &options.model,
@@ -421,19 +480,18 @@ impl AgentSession {
 /// cancelled, or exhausted session is delivered as [`SessionEvent::Finished`].
 #[expect(
     clippy::too_many_arguments,
-    reason = "one turn genuinely needs all eight: the leg, the model, what was asked, the standing \
-              orders, the bounds, the replay window, the stop flag, and where to report. Gathering \
-              them into a struct would add a type whose only purpose is to satisfy this lint, and \
-              whose fields would be moved out again on the first line of the body"
+    reason = "a turn carries its broker leg, model, authored agent, limits, history, cancellation, progress and output channel together"
 )]
 pub async fn run_turn(
     leg: Arc<BrokerLeg>,
     model: Arc<dyn ChatModel + Send + Sync>,
     prompt: String,
     system: Option<String>,
+    agent: Agent,
     options: ConsoleOptions,
     mut history: History,
     stop: StopFlag,
+    progress: Arc<dyn ProgressSink>,
     events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
 ) -> Result<History, SessionError> {
     tokio::task::spawn_blocking(move || {
@@ -449,16 +507,54 @@ pub async fn run_turn(
                     sequence.clone(),
                 ),
                 limits: options.shell_limits,
-                curl_capability: None,
             },
             events.clone(),
             sequence,
         );
         let usage = RecordingUsage::new(events.clone());
+        let skills = options
+            .skills
+            .get(
+                &agent
+                    .metadata
+                    .name
+                    .parse::<AgentId>()
+                    .expect("validated catalog agent"),
+            )
+            .map_or(&[][..], Vec::as_slice);
+        let config = AgentConfigView::new(
+            agent.metadata.name.clone(),
+            agent.spec.description.clone(),
+            agent.spec.model_class.clone(),
+            system.clone(),
+            SessionConfigView {
+                max_steps: options.prompt_limits.max_steps,
+                max_capability_calls: options.prompt_limits.max_capability_calls,
+                memory: MemoryConfigView::OneShot,
+            },
+            leg.effective_capabilities(),
+        )
+        .with_skills(
+            skills
+                .iter()
+                .map(|skill| SkillView {
+                    name: skill.name().to_string(),
+                    description: skill.description().to_owned(),
+                    resources: skill
+                        .resources()
+                        .iter()
+                        .map(|resource| resource.path.clone())
+                        .collect(),
+                })
+                .collect(),
+        );
         let inputs = SessionInputs::new(&prompt, options.prompt_limits)
             .with_system(system.as_deref())
+            .with_skills(skills)
+            .with_agent_config(&config)
             .with_usage_observer(&usage)
-            .with_cancellation(&stop);
+            .with_cancellation(&stop)
+            .with_progress(progress);
 
         let outcome = run_prompt_session(model.as_ref(), &runtime, inputs, &mut history)
             .map_err(|error| error.to_string());
@@ -484,7 +580,7 @@ pub async fn run_turn(
 ///
 /// `SessionInvoker` wants an owned `Box<dyn CapabilityInvoker + Send>` while the console keeps the
 /// leg for its shell pane, so this forwards through the `Arc` both hold.
-struct LegHandle(Arc<BrokerLeg>);
+pub(crate) struct LegHandle(pub Arc<BrokerLeg>);
 
 impl CapabilityInvoker for LegHandle {
     fn granted(&self) -> Vec<String> {
@@ -495,10 +591,6 @@ impl CapabilityInvoker for LegHandle {
         self.0.is_granted(capability)
     }
 
-    fn grants_namespace(&self, namespace: &str) -> bool {
-        self.0.grants_namespace(namespace)
-    }
-
     fn command_words(&self) -> Vec<String> {
         self.0.command_words()
     }
@@ -507,27 +599,40 @@ impl CapabilityInvoker for LegHandle {
         self.0.has_command_word(word)
     }
 
-    fn resolve_command(
-        &self,
-        word: &str,
-        argv: &[String],
-    ) -> Option<Result<(String, Value), String>> {
-        self.0.resolve_command(word, argv)
-    }
-
     fn describe(&self, capability: &str) -> Option<CapabilityDescription> {
         self.0.describe(capability)
     }
 
-    // TODO(dekopon 0.12): forward `invoke_with_secret_use` explicitly, as
-    // `RecordingInvoker` must — see the note there. `dekopon-shell` 0.11.1 has no such method, so
-    // there is nothing to forward yet; when the pin moves, the trait's default *denies* a
-    // secret-use proposal, which is right for a direct invoker and wrong for this one. The leg
-    // behind this `Arc` is broker-backed, and it is the broker that authorizes a DRN. Inheriting
-    // the default would refuse every `curl --oauth2-bearer '${drn:…}'` a script writes, naming the
-    // wrong cause.
-    fn invoke(&self, capability: &str, input: Value) -> CapabilityCallResult {
-        self.0.invoke(capability, input)
+    fn run_command(&self, word: &str, argv: &[String], stdin: Option<&str>) -> Option<CommandRun> {
+        self.0.run_command(word, argv, stdin)
+    }
+
+    fn script_finished(&self) {
+        self.0.script_finished();
+    }
+
+    fn invoke(
+        &self,
+        capability: &str,
+        input: Value,
+        secret_use: Option<SecretUseProposal>,
+    ) -> CapabilityCallResult {
+        refuse_unpresented_assets(self.0.invoke(capability, input, secret_use))
+    }
+}
+
+/// Never report a completed provider effect as a successful console asset delivery.
+/// The core leg has already released any returned descriptors when this runs; a failed outcome
+/// names that fact and warns against repeating the effect, rather than claiming no effect occurred.
+fn refuse_unpresented_assets(result: CapabilityCallResult) -> CapabilityCallResult {
+    match &result {
+        CapabilityCallResult::Succeeded(output) if output.get("assetNote").and_then(Value::as_str)
+            .is_some_and(|note| note.contains("this embedder has no asset store")) =>
+            CapabilityCallResult::Failed {
+                error: "provider effect executed, but console cannot retain or deliver returned assets; do not repeat the call".into(),
+                detail: None,
+            },
+        _ => result,
     }
 }
 

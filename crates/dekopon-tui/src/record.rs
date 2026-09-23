@@ -21,15 +21,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dekopon_agent::prompt::{ModelUsageObserver, PromptOutcome, ScriptRuntime};
+use dekopon_agent::{
+    progress::{ProgressEvent, ProgressSink},
+    prompt::{ModelUsageObserver, PromptOutcome, ScriptRuntime},
+};
+use dekopon_core::SecretUseProposal;
 use dekopon_model::model::ModelUsage;
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, ScriptOutcome,
+    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandRun, ScriptOutcome,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::app::Payload;
+use crate::app::{Payload, ShellEntry};
 
 /// What one capability invocation did.
 ///
@@ -65,7 +69,7 @@ impl From<&CapabilityCallResult> for CallOutcome {
         match result {
             CapabilityCallResult::Succeeded(output) => Self::Succeeded(output.clone()),
             CapabilityCallResult::Denied { reason } => Self::Denied(reason.clone()),
-            CapabilityCallResult::Failed { error } => Self::Failed(error.clone()),
+            CapabilityCallResult::Failed { error, .. } => Self::Failed(error.clone()),
             CapabilityCallResult::NotFound => Self::NotFound,
         }
     }
@@ -142,6 +146,10 @@ pub enum SessionEvent {
     ScriptFinished(Box<ScriptRun>),
     /// The provider reported token accounting for one model response, or reported none.
     ModelUsage(Option<ModelUsage>),
+    /// Bounded metadata about in-flight work; no model text or tool payload.
+    Progress(String),
+    /// The local bounded shell pane completed one line.
+    ShellFinished(ShellEntry),
     /// The session ended. Always the last event.
     Finished(Box<Result<PromptOutcome, String>>),
 }
@@ -209,10 +217,6 @@ impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
         self.inner.is_granted(capability)
     }
 
-    fn grants_namespace(&self, namespace: &str) -> bool {
-        self.inner.grants_namespace(namespace)
-    }
-
     fn command_words(&self) -> Vec<String> {
         self.inner.command_words()
     }
@@ -221,35 +225,28 @@ impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
         self.inner.has_command_word(word)
     }
 
-    fn resolve_command(
-        &self,
-        word: &str,
-        argv: &[String],
-    ) -> Option<Result<(String, Value), String>> {
-        self.inner.resolve_command(word, argv)
-    }
-
     fn describe(&self, capability: &str) -> Option<CapabilityDescription> {
         self.inner.describe(capability)
     }
 
-    // TODO(dekopon 0.12): forward `invoke_with_secret_use` explicitly.
-    //
-    // `dekopon-shell` 0.11.1 — the version pinned in the workspace manifest — has no such method;
-    // public DRNs and typed secret-use proposals landed upstream after that release. When the pin
-    // moves, this trait gains one, and it arrives with a *default body that denies* any proposal
-    // carrying a secret-use intent, because a direct or test invoker has no broker to authorize
-    // one. A decorator that inherits that default turns every DRN proposal into
-    // `secret references require a broker-backed capability` even though the leg underneath is
-    // broker-backed — a refusal the operator cannot act on, produced by a wrapper whose whole job
-    // is to change nothing. So this impl must override it, record the call exactly as `invoke`
-    // does, and hand `secret_use` through to `self.inner`. Dekopon's scrub finding #8 is the
-    // upstream half of the same problem.
-    fn invoke(&self, capability: &str, input: Value) -> CapabilityCallResult {
+    fn run_command(&self, word: &str, argv: &[String], stdin: Option<&str>) -> Option<CommandRun> {
+        self.inner.run_command(word, argv, stdin)
+    }
+
+    fn script_finished(&self) {
+        self.inner.script_finished();
+    }
+
+    fn invoke(
+        &self,
+        capability: &str,
+        input: Value,
+        secret_use: Option<SecretUseProposal>,
+    ) -> CapabilityCallResult {
         let sequence = self.sequence.next();
         let recorded = input.clone();
         let started = Instant::now();
-        let result = self.inner.invoke(capability, input);
+        let result = self.inner.invoke(capability, input, secret_use);
         emit(
             &self.events,
             SessionEvent::Capability(Box::new(CapabilityCall {
@@ -312,6 +309,49 @@ impl<R: ScriptRuntime> ScriptRuntime for RecordingRuntime<R> {
 
     fn command_words(&self) -> Vec<String> {
         self.inner.command_words()
+    }
+}
+
+/// Reports model/tool milestones without a second stream of model-authored text or arguments.
+pub struct RecordingProgress {
+    events: SessionEvents,
+}
+
+impl RecordingProgress {
+    /// Creates a progress adapter for the terminal event loop.
+    pub const fn new(events: SessionEvents) -> Self {
+        Self { events }
+    }
+}
+
+impl ProgressSink for RecordingProgress {
+    fn emit(&self, event: ProgressEvent) {
+        let message = match event {
+            ProgressEvent::ModelTurn { turn, of } => format!("model turn {turn}/{of}"),
+            ProgressEvent::ToolStarted {
+                word,
+                calls_used,
+                calls_max,
+                ..
+            } => format!("{} started · calls {calls_used}/{calls_max}", word.as_str()),
+            ProgressEvent::ToolFinished { word, outcome, .. } => {
+                format!("{}: {outcome:?}", word.as_str())
+            }
+            ProgressEvent::Cancelled { .. } => "stopped; sent effects are not rolled back".into(),
+            ProgressEvent::Failed { class } => format!("turn failed: {class:?}"),
+            ProgressEvent::Finished {
+                outcome,
+                turns,
+                tool_calls,
+                ..
+            } => format!("{outcome:?} · {turns} model turns · {tool_calls} tools"),
+            ProgressEvent::Started { .. }
+            | ProgressEvent::Answered { .. }
+            | ProgressEvent::TextDelta { .. }
+            | ProgressEvent::Attachment { .. }
+            | ProgressEvent::KeepAlive { .. } => return,
+        };
+        emit(&self.events, SessionEvent::Progress(message));
     }
 }
 

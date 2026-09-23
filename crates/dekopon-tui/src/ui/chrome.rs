@@ -5,11 +5,28 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use super::Theme;
 use crate::app::{App, Pane};
+
+/// Shows the represented identity separately from the authenticated console peer.
+pub fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let agent = app
+        .session
+        .as_ref()
+        .map_or("picker", |session| session.agent.as_str());
+    let label = format!(
+        "agent: {agent} · profile: {} · subject: {} · console: dekopon-console (uid {}) · REQUESTED scope: {} · model: {} · LIVE PROVIDERS — effects are real",
+        app.profile.as_deref().unwrap_or("subject-only"),
+        app.subject,
+        rustix::process::geteuid().as_raw(),
+        app.scope_label,
+        app.model
+    );
+    frame.render_widget(Paragraph::new(crate::redact::sanitize_line(&label)), area);
+}
 
 /// Draws the pane tabs.
 pub fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -35,7 +52,7 @@ pub fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// Draws the status line: the notice, then the facts that must never be a guess.
 pub fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let [left, right] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(46)]).areas(area);
+        Layout::horizontal([Constraint::Min(10), Constraint::Length(56)]).areas(area);
 
     let notice = app.notice.as_ref().map_or_else(
         || Span::styled("? for keys", Style::default().fg(Theme::FORGOTTEN)),
@@ -69,6 +86,31 @@ pub fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// The credential file's own name, which is the part that says whose credential this is.
 fn credential_label(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Confirmation for a scope claim which this broker wire cannot echo as trusted context.
+pub fn draw_scope_warning(frame: &mut Frame<'_>, app: &App) {
+    let area = centered(frame.area(), 86, 12);
+    frame.render_widget(Clear, area);
+    let text = format!(
+        "REQUESTED scope: {}\n\nThe broker protocol does not echo authenticated chat scope. An attestor with empty chatScopes silently downgrades this claim to subject-only. Console-via Cedar must refuse missing trusted scope; verify exact grants before any model turn.\n\nLIVE PROVIDERS — effects are real. Enter to continue; any other key to cancel.",
+        app.scope_label
+    );
+    frame.render_widget(
+        Paragraph::new(
+            text.lines()
+                .map(crate::redact::sanitize_line)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Unverified route-context claim"),
+        ),
+        area,
+    );
 }
 
 /// Draws the keybinding overlay.

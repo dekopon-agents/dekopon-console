@@ -10,38 +10,12 @@ use tempfile::TempDir;
 
 /// A catalog with one agent, so catalog loading is never the reason a test fails.
 const CATALOG: &str = r"apiVersion: dekopon.dev/v1alpha1
-kind: Provider
-metadata:
-  name: echo
-spec:
-  description: Echo provider declaration
-  type: echo
-  credentialRef: echo-default
----
-apiVersion: dekopon.dev/v1alpha1
-kind: Capability
-metadata:
-  name: echo.echo
-spec:
-  description: Echo a message back
-  provider: echo
-  effect: read-only
-  risk: Low
-  idempotency: idempotent
-  permissions:
-    - operation: echo:invoke
----
-apiVersion: dekopon.dev/v1alpha1
 kind: Agent
 metadata:
   name: reviewer
 spec:
   description: A fixture agent
   enabled: true
-  capabilities:
-    - echo.echo
-  providers:
-    - echo
 ";
 
 fn binary() -> Command {
@@ -84,6 +58,10 @@ fn help_lists_every_flag_a_deployment_might_need() {
         "--max-steps",
         "--max-capability-calls",
         "--subject",
+        "--agent",
+        "--profile",
+        "--profiles",
+        "--idle",
         "--socket",
         "--server-uid",
     ] {
@@ -132,16 +110,19 @@ fn a_credential_file_and_an_endpoint_are_mutually_exclusive() {
 
 #[test]
 fn the_session_bounds_are_numbers_and_are_checked_at_the_command_line() {
-    for flag in ["--max-steps", "--max-capability-calls"] {
-        let output = binary()
-            .args([flag, "lots"])
-            .output()
-            .expect("the console binary starts");
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "{flag} accepted a non-number"
-        );
+    for (flag, too_large) in [("--max-steps", "65"), ("--max-capability-calls", "257")] {
+        for value in ["lots", "0", too_large] {
+            let output = binary()
+                .args([flag, value])
+                .output()
+                .expect("the console binary starts");
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{flag} accepted {value}: {}",
+                stderr(&output)
+            );
+        }
     }
 }
 
@@ -154,9 +135,8 @@ fn no_subject_refuses_before_it_touches_anything() {
     assert!(message.contains("--subject"), "{message}");
     assert!(message.contains("DEKOPON_CONSOLE_SUBJECT"), "{message}");
     assert!(
-        message.contains("allowDevelopmentSubjects"),
-        "the refusal must name the broker-side opt-in too, or the next failure is a mystery: \
-         {message}"
+        message.contains("defaultProfile"),
+        "the refusal must name the authored identity route: {message}"
     );
 }
 
@@ -181,7 +161,7 @@ fn every_flag_together_reaches_the_broker_connection_rather_than_a_usage_error()
         .args(["--socket".as_ref(), socket.as_os_str()])
         .args([
             "--subject",
-            "dev.console.xavier",
+            "slack.t0123abc.u9xyz",
             "--model",
             "gpt-5.6-luna",
             "--endpoint",
@@ -204,8 +184,8 @@ fn every_flag_together_reaches_the_broker_connection_rather_than_a_usage_error()
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        message.contains("broker.sock") || message.contains("broker"),
-        "the failure must be the missing broker, not something earlier: {message}"
+        message.contains("TTY"),
+        "the interactive command must refuse without a terminal before contacting broker: {message}"
     );
 }
 
@@ -223,7 +203,7 @@ fn the_chatgpt_path_is_the_default_and_takes_the_credential_file_it_is_given() {
         .args(["--socket".as_ref(), socket.as_os_str()])
         .args([
             "--subject",
-            "dev.console.xavier",
+            "slack.t0123abc.u9xyz",
             "--auth-file",
             "/nonexistent/dekopon/chatgpt-auth.console.json",
         ])
@@ -234,8 +214,149 @@ fn the_chatgpt_path_is_the_default_and_takes_the_credential_file_it_is_given() {
     assert_ne!(output.status.code(), Some(2), "{message}");
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        message.contains("broker"),
-        "an explicit credential file is taken as written, so the broker is what is missing: \
-         {message}"
+        message.contains("TTY"),
+        "an explicit credential file is accepted before the interactive TTY gate: {message}"
     );
+}
+
+fn profile_fixture(text: &str) -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let (dir, catalog) = catalog();
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(&profiles, text).expect("profiles fixture");
+    (dir, catalog, profiles)
+}
+
+const PROFILE: &str = "defaultProfile: family\nprofiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope:\n      kind: slack\n      transport: operator\n      conversation: {kind: directMessage, container: t0123abc, id: d0123abc}\n    model: test-model\n    maxSteps: 2\n    maxCapabilityCalls: 3\n";
+
+#[test]
+fn authored_default_profile_is_accepted_without_subject_or_model_credential() {
+    let (_dir, catalog, profiles) = profile_fixture(PROFILE);
+    let output = binary()
+        .args(["--config".as_ref(), catalog.as_os_str()])
+        .args(["--profiles".as_ref(), profiles.as_os_str()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("TTY"), "{}", stderr(&output));
+}
+
+#[test]
+fn explicit_profile_is_bound_to_its_agent() {
+    let (_dir, catalog, profiles) = profile_fixture(PROFILE);
+    let output = binary()
+        .args(["--config".as_ref(), catalog.as_os_str()])
+        .args(["--profiles".as_ref(), profiles.as_os_str()])
+        .args(["--profile", "family", "--agent", "other"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("conflicts"), "{}", stderr(&output));
+}
+
+#[test]
+fn ambiguous_profiles_never_select_the_first_identity() {
+    let duplicate = format!(
+        "{}  - name: second\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n",
+        PROFILE
+    );
+    let (_dir, catalog, profiles) = profile_fixture(&duplicate);
+    let output = binary()
+        .args(["--config".as_ref(), catalog.as_os_str()])
+        .args(["--profiles".as_ref(), profiles.as_os_str()])
+        .args(["--agent", "reviewer"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("multiple profiles"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn unknown_agent_and_profile_names_refuse_before_connecting() {
+    let (_dir, catalog, profiles) = profile_fixture(PROFILE);
+    let base = || {
+        let mut cmd = binary();
+        cmd.args(["--config".as_ref(), catalog.as_os_str()]);
+        cmd.args(["--profiles".as_ref(), profiles.as_os_str()]);
+        cmd
+    };
+    let unknown = base().args(["--agent", "missing"]).output().unwrap();
+    assert!(
+        stderr(&unknown).contains("unknown agent"),
+        "{}",
+        stderr(&unknown)
+    );
+    let unknown = base().args(["--profile", "missing"]).output().unwrap();
+    assert!(
+        stderr(&unknown).contains("unknown profile"),
+        "{}",
+        stderr(&unknown)
+    );
+}
+
+#[test]
+fn malformed_profile_document_and_missing_default_are_refused() {
+    for text in [
+        "defaultProfile: missing\nprofiles: []\n",
+        "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    maxSteps: 0\n",
+        "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope: {kind: slack, transport: operator, conversation: {kind: directMessage, id: d0123abc}}\n",
+        "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    unknownField: true\n",
+        "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n",
+    ] {
+        let (_dir, catalog, profiles) = profile_fixture(text);
+        let output = binary()
+            .args(["--config".as_ref(), catalog.as_os_str()])
+            .args(["--profiles".as_ref(), profiles.as_os_str()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("profile configuration"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn no_terminal_refuses_direct_selection_without_contacting_broker_or_model() {
+    let (_dir, catalog) = catalog();
+    let output = binary()
+        .args(["--config".as_ref(), catalog.as_os_str()])
+        .args([
+            "--subject",
+            "slack.t0123abc.u9xyz",
+            "--agent",
+            "reviewer",
+            "--endpoint",
+            "http://127.0.0.1:9/v1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("TTY"), "{}", stderr(&output));
+}
+
+#[test]
+fn idle_starts_without_a_catalog_or_model_and_exits_on_sigterm() {
+    let mut child = binary()
+        .arg("--idle")
+        .env("DEKOPON_BROKER_SOCKET", "/nonexistent/broker.sock")
+        .spawn()
+        .expect("idle process starts");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "idle must remain alive without config or broker"
+    );
+    let signal = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signal.success(), "send SIGTERM");
+    let status = child.wait().expect("SIGTERM exits idle");
+    assert!(status.success(), "idle must exit gracefully: {status}");
 }

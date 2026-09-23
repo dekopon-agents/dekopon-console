@@ -25,6 +25,7 @@ fn agent(name: &str, description: &str) -> Agent {
             instructions: None,
             capabilities: Vec::new(),
             providers: Vec::new(),
+            skills: Vec::new(),
             model_class: Some("reasoning".to_owned()),
             policy_profile: None,
         },
@@ -35,7 +36,7 @@ fn agent(name: &str, description: &str) -> Agent {
 fn console(agents: Vec<Agent>) -> App {
     App::new(
         agents,
-        "dev.console.xavier".to_owned(),
+        "slack.t0123abc.u9xyz".to_owned(),
         "/run/dekopon/broker.sock".to_owned(),
         "/config/dekopon/chatgpt-auth.console.json".to_owned(),
     )
@@ -76,13 +77,27 @@ fn the_status_line_shows_the_subject_and_the_credential_file() {
     // spends. An operator must never have to guess either.
     let drawn = frame(&console(Vec::new()));
     assert!(
-        drawn.contains("dev.console.xavier"),
+        drawn.contains("slack.t0123abc.u9xyz"),
         "the subject is missing"
     );
     assert!(
         drawn.contains("chatgpt-auth.console.json"),
         "the credential file is missing"
     );
+}
+
+#[test]
+fn scoped_confirmation_does_not_claim_that_the_broker_validated_the_claim() {
+    let mut app = console(vec![agent("reviewer", "fixture")]);
+    app.scope_label = "operator / slack / directMessage".into();
+    app.mode = Mode::ScopeWarning;
+    let drawn = frame(&app);
+    for phrase in ["REQUESTED scope", "does not echo", "Enter to continue"] {
+        assert!(
+            drawn.contains(phrase),
+            "warning is missing {phrase}: {drawn}"
+        );
+    }
 }
 
 #[test]
@@ -274,6 +289,7 @@ fn a_forgotten_turn_is_marked_as_outside_the_replay_window() {
                 model_turns: 1,
                 script_calls: 0,
                 capability_invocations: 0,
+                suggestions: Vec::new(),
             },
         ))));
     }

@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.98.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dekopon-agents/dekopon-console"
 homepage = "https://github.com/dekopon-agents/dekopon-console"
@@ -19,29 +19,28 @@ rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 thiserror = "2.0.19"
-tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "signal"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 # Exact crates.io versions of one Dekopon release, never path or git dependencies.
 #
-# `=0.11.1` rather than `0.11.1`: these crates are pre-1.0, so a caret range would admit 0.11.2 and
-# a patch release of the broker protocol is a wire contract this console has not been run against.
+# Exact =0.19.0 pins: these pre-1.0 crates and the broker wire must be tested as a set.
 # Not a git dependency either — `dekopon-provider-gh` pinned a branch once, and a `branch =`
 # dependency resolves by fetching the ref, so a deleted branch broke every cold-cache build.
 #
-# TODO(dekopon 0.12): re-pin. Dekopon's scrub finding #8 changes `CapabilityInvoker` so that a
-# wrapper cannot inherit the trait's DRN-refusing `invoke_with_secret_use` default by accident. Both
-# wrappers here forward it explicitly already, which is what that change is going to require; when
-# 0.12 lands, re-read the trait and drop any forwarding it makes redundant.
-dekopon-agent = "=0.11.1"
-dekopon-broker-protocol = "=0.11.1"
-dekopon-config = "=0.11.1"
-dekopon-core = { version = "=0.11.1", default-features = false }
-dekopon-model = "=0.11.1"
-dekopon-protocol = { version = "=0.11.1", default-features = false }
-dekopon-shell = "=0.11.1"
+# Core main e9800510 changed model APIs after this publication; do not claim those APIs here.
+dekopon-agent = "=0.19.0"
+dekopon-broker-protocol = "=0.19.0"
+dekopon-config = "=0.19.0"
+dekopon-core = { version = "=0.19.0", default-features = false }
+dekopon-model = "=0.19.0"
+dekopon-protocol = { version = "=0.19.0", default-features = false }
+dekopon-process = "=0.19.0"
+dekopon-shell = "=0.19.0"
 dekopon-tui = { version = "0.11.1", path = "crates/dekopon-tui" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

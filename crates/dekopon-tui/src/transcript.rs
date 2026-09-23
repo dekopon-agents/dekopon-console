@@ -193,6 +193,7 @@ impl Turn {
                 }
             }
             SessionEvent::ModelUsage(usage) => self.tokens.absorb(usage),
+            SessionEvent::Progress(_) | SessionEvent::ShellFinished(_) => {}
             SessionEvent::Finished(outcome) => {
                 self.status = match *outcome {
                     Ok(outcome) => match outcome.disposition {

@@ -19,6 +19,7 @@ use crossterm::{
 use dekopon_agent::prompt::History;
 use dekopon_broker_protocol::BrokerClient;
 use dekopon_model::model::ChatModel;
+use dekopon_process::CancelSignal;
 use dekopon_shell::Interpreter;
 use futures_util::StreamExt as _;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -26,9 +27,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
     app::{App, Mode, Notice, Pane, ShellEntry},
-    record::SessionEvent,
+    record::{RecordingProgress, SessionEvent},
     session::{
-        AgentSession, ConsoleOptions, SessionError, StopFlag, build_model, open_agent,
+        AgentSession, ConsoleOptions, LegHandle, SessionError, StopFlag, build_model, open_agent,
         session_channel,
     },
     ui,
@@ -48,7 +49,19 @@ impl TerminalGuard {
         // No mouse capture. Every mouse event this loop received was discarded, and capturing them
         // took the terminal's own text selection and scrollback away from the operator to do it —
         // which is exactly what an operator wants after revealing a field.
-        execute!(stdout, EnterAlternateScreen)?;
+        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+            if let Err(restore_error) = disable_raw_mode() {
+                eprintln!("warning: raw mode cleanup failed: {restore_error}");
+            }
+            return Err(error);
+        }
+        let terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                restore();
+                return Err(error);
+            }
+        };
 
         let previous = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
@@ -58,7 +71,7 @@ impl TerminalGuard {
             previous(info);
         }));
 
-        Ok((Self, Terminal::new(CrosstermBackend::new(io::stdout()))?))
+        Ok((Self, terminal))
     }
 }
 
@@ -87,6 +100,7 @@ fn restore() {
 struct RunningTurn {
     events: UnboundedReceiver<SessionEvent>,
     handle: tokio::task::JoinHandle<Result<History, SessionError>>,
+    shell: bool,
 }
 
 /// Runs the console until the operator quits.
@@ -99,22 +113,34 @@ struct RunningTurn {
 pub async fn run(
     mut app: App,
     client: BrokerClient,
-    options: ConsoleOptions,
+    mut options: ConsoleOptions,
 ) -> Result<(), ConsoleExit> {
-    let model: Arc<dyn ChatModel + Send + Sync> =
-        Arc::from(build_model(&options).map_err(ConsoleExit::Session)?);
     let (_guard, mut terminal) = TerminalGuard::enter().map_err(ConsoleExit::Terminal)?;
 
     let stop = StopFlag::default();
     let mut keys = EventStream::new();
     let mut running: Option<RunningTurn> = None;
     let mut history = History::new(options.history_limits);
+    if options.initial_agent.is_some() {
+        dispatch(
+            &mut app,
+            Action::Enter,
+            &client,
+            &mut options,
+            &mut running,
+            &mut history,
+            &stop,
+        )
+        .await;
+    }
 
     loop {
-        terminal
-            .draw(|frame| ui::draw(frame, &app))
-            .map_err(ConsoleExit::Terminal)?;
+        if let Err(error) = terminal.draw(|frame| ui::draw(frame, &app)) {
+            stop_running(&mut running, &stop).await;
+            return Err(ConsoleExit::Terminal(error));
+        }
         if app.should_quit {
+            stop_running(&mut running, &stop).await;
             return Ok(());
         }
 
@@ -124,20 +150,32 @@ pub async fn run(
             key = keys.next() => match key {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                     if let Some(action) = on_key(&mut app, key, &stop) {
-                        dispatch(&mut app, action, &client, &options, &model, &mut running,
+                        dispatch(&mut app, action, &client, &mut options, &mut running,
                                  &mut history, &stop).await;
                     }
                 }
                 Some(Ok(_)) => {}
-                Some(Err(error)) => return Err(ConsoleExit::Terminal(error)),
-                None => return Ok(()),
+                Some(Err(error)) => { stop_running(&mut running, &stop).await; return Err(ConsoleExit::Terminal(error)); },
+                None => { app.should_quit = true; },
             },
             event = recv(&mut running) => {
                 match event {
+                    Some(SessionEvent::Progress(message)) => app.notice = Some(Notice::info(message)),
+                    Some(SessionEvent::ShellFinished(entry)) => app.push_shell(entry),
                     Some(event) => app.on_session_event(event),
                     None => finish_turn(&mut app, &mut running, &mut history, &stop).await,
                 }
             }
+        }
+    }
+}
+
+/// Join the blocking turn before releasing its broker leg and restoring the terminal.
+async fn stop_running(running: &mut Option<RunningTurn>, stop: &StopFlag) {
+    if let Some(turn) = running.take() {
+        stop.request();
+        if let Err(error) = turn.handle.await {
+            tracing::warn!(%error, "stopped console task did not join cleanly");
         }
     }
 }
@@ -163,6 +201,7 @@ async fn finish_turn(
     let Some(turn) = running.take() else {
         return;
     };
+    let shell = turn.shell;
     match turn.handle.await {
         Ok(Ok(returned)) => *history = returned,
         // The session's own history is lost, so the model's replay window is now a guess. Saying so
@@ -171,7 +210,11 @@ async fn finish_turn(
         Err(error) => app.notice = Some(Notice::refusal(format!("the session task died: {error}"))),
     }
     stop.reset();
-    app.on_session_complete(history.len());
+    if shell {
+        app.busy = false;
+    } else {
+        app.on_session_complete(history.len());
+    }
 }
 
 /// Something the loop must do that needs more than the state machine.
@@ -191,6 +234,15 @@ pub enum Action {
 pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
+        return None;
+    }
+    if app.mode == Mode::ScopeWarning {
+        app.mode = Mode::Browsing;
+        if key.code == KeyCode::Enter {
+            app.scope_warning_confirmed = true;
+            return Some(Action::Enter);
+        }
+        app.notice = Some(Notice::info("requested scope was not opened"));
         return None;
     }
     if app.mode == Mode::Help {
@@ -254,32 +306,108 @@ fn on_composing_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 #[cfg(test)]
 mod tests;
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the loop's whole mutable world, threaded through one place rather than gathered into \
-              a struct that would exist only to satisfy this lint"
-)]
 async fn dispatch(
     app: &mut App,
     action: Action,
     client: &BrokerClient,
-    options: &ConsoleOptions,
-    model: &Arc<dyn ChatModel + Send + Sync>,
+    options: &mut ConsoleOptions,
     running: &mut Option<RunningTurn>,
     history: &mut History,
     stop: &StopFlag,
 ) {
     match action {
         Action::Enter => {
+            if app.busy {
+                app.notice = Some(Notice::refusal(
+                    "stop the current turn before switching agents",
+                ));
+                return;
+            }
             let Some(agent) = app.highlighted_id() else {
+                app.notice = Some(Notice::refusal("the catalog contains no agents"));
                 return;
             };
-            match open_agent(client.clone(), options.subject.clone(), agent.clone()).await {
+            if options.fixed_profile.as_ref().is_some_and(|name| {
+                options
+                    .profiles
+                    .iter()
+                    .any(|p| &p.name == name && p.agent != agent)
+            }) {
+                app.notice = Some(Notice::refusal(
+                    "--profile is bound to its agent; restart with a matching profile",
+                ));
+                return;
+            }
+            let matches: Vec<_> = options
+                .profiles
+                .iter()
+                .filter(|p| p.agent == agent)
+                .collect();
+            if matches.len() > 1 && options.fixed_profile.is_none() {
+                app.notice = Some(Notice::refusal(format!(
+                    "multiple profiles for {agent}; restart with --profile <NAME>"
+                )));
+                return;
+            }
+            if let Some(profile) = options
+                .fixed_profile
+                .as_ref()
+                .and_then(|name| matches.iter().copied().find(|p| &p.name == name))
+                .or_else(|| matches.first().copied())
+            {
+                options.subject = profile.subject.clone();
+                options.scope = profile.scope.clone();
+                options.model = options
+                    .model_override
+                    .clone()
+                    .or_else(|| profile.model.clone())
+                    .unwrap_or_else(|| "gpt-5.6-luna".into());
+                options.prompt_limits.max_steps =
+                    options.steps_override.or(profile.max_steps).unwrap_or(8);
+                options.prompt_limits.max_capability_calls = options
+                    .calls_override
+                    .or(profile.max_capability_calls)
+                    .unwrap_or(16);
+                app.profile = Some(profile.name.clone());
+            } else if !options.profiles.is_empty() {
+                app.notice = Some(Notice::refusal(format!(
+                    "no authored profile for {agent}; restart without --profiles and with --subject for subject-only use"
+                )));
+                return;
+            }
+            // A hop (including a refused hop or pending scope warning) must never leave
+            // the prior agent usable under the newly selected subject/model.
+            app.session = None;
+            app.broker_trace = None;
+            app.transcript = Default::default();
+            app.shell_history.clear();
+            *history = History::new(options.history_limits);
+            app.subject = options.subject.to_string();
+            app.scope_label = options
+                .scope
+                .as_ref()
+                .map(|s| serde_json::to_string(s).expect("typed scope serializes"))
+                .unwrap_or_else(|| "subject-only".into());
+            app.model = options.model.clone();
+            if options.scope.is_some() && !app.scope_warning_confirmed {
+                app.mode = Mode::ScopeWarning;
+                return;
+            }
+            app.scope_warning_confirmed = false;
+            match open_agent(
+                client.clone(),
+                options.subject.clone(),
+                agent.clone(),
+                options.scope.clone(),
+            )
+            .await
+            {
+                Ok(leg) if leg.effective_capabilities().is_empty() => {
+                    app.notice = Some(Notice::refusal(
+                        "broker grants no capabilities for this context; no model call will be sent",
+                    ));
+                }
                 Ok(leg) => {
-                    // The replay window belongs to the conversation, and hopping starts a new one.
-                    // Carrying the old history across would replay one agent's exchanges into
-                    // another agent's prompt.
-                    *history = History::new(options.history_limits);
                     app.enter(AgentSession::new(agent, leg, options.history_limits));
                 }
                 Err(error) => app.notice = Some(Notice::refusal(error.to_string())),
@@ -289,21 +417,64 @@ async fn dispatch(
             let Some(session) = app.session.as_ref() else {
                 return;
             };
+            let leg = match open_agent(
+                client.clone(),
+                options.subject.clone(),
+                session.agent.clone(),
+                options.scope.clone(),
+            )
+            .await
+            {
+                Ok(leg) if !leg.effective_capabilities().is_empty() => leg,
+                Ok(_) => {
+                    refuse_turn(
+                        app,
+                        "broker grants no capabilities; no model call will be sent".into(),
+                    );
+                    return;
+                }
+                Err(error) => {
+                    refuse_turn(app, error.to_string());
+                    return;
+                }
+            };
+            app.broker_trace = Some(leg.session_trace().to_string());
+            let model: Arc<dyn ChatModel + Send + Sync> = match build_model(options) {
+                Ok(model) => Arc::from(model),
+                Err(error) => {
+                    refuse_turn(app, error.to_string());
+                    return;
+                }
+            };
             let (sender, receiver) = session_channel();
+            let progress = Arc::new(RecordingProgress::new(sender.clone()));
             stop.reset();
-            let handle = tokio::spawn(crate::session::run_turn(
-                Arc::clone(session.leg()),
-                Arc::clone(model),
-                prompt,
-                instructions(app),
-                options.clone(),
-                std::mem::replace(history, History::new(options.history_limits)),
-                stop.clone(),
-                sender,
-            ));
+            let (handle_cancel, signal) = CancelSignal::pair();
+            stop.bind_broker(handle_cancel);
+            let handle =
+                tokio::spawn(crate::session::run_turn(
+                    Arc::new(leg.with_cancel_signal(signal).with_progress(
+                        progress.clone(),
+                        options.prompt_limits.max_capability_calls,
+                    )),
+                    model,
+                    prompt,
+                    instructions(app),
+                    app.agents
+                        .iter()
+                        .find(|agent| agent.metadata.name == session.agent.as_str())
+                        .expect("session catalog agent")
+                        .clone(),
+                    options.clone(),
+                    std::mem::replace(history, History::new(options.history_limits)),
+                    stop.clone(),
+                    progress,
+                    sender,
+                ));
             *running = Some(RunningTurn {
                 events: receiver,
                 handle,
+                shell: false,
             });
         }
         Action::Shell(line) => {
@@ -311,27 +482,72 @@ async fn dispatch(
                 app.notice = Some(Notice::refusal("hop into an agent first"));
                 return;
             };
-            let leg = Arc::clone(session.leg());
-            let limits = options.shell_limits;
-            // The interpreter is synchronous and the leg is only valid on a blocking task, exactly
-            // as it is inside a session; the shell pane is the same seam, not a lighter one.
-            let outcome = tokio::task::spawn_blocking(move || {
-                let outcome = Interpreter::new(limits).run(&line, leg.as_ref());
-                (line, outcome)
-            })
-            .await;
-            match outcome {
-                Ok((input, outcome)) => app.push_shell(ShellEntry {
-                    input,
-                    output: outcome.output,
-                    exit_code: outcome.exit_code.get(),
-                }),
-                Err(error) => {
-                    app.notice = Some(Notice::refusal(format!("the shell task died: {error}")));
-                }
+            if app.busy {
+                app.notice = Some(Notice::refusal(
+                    "another command or turn is running; press Esc to stop it",
+                ));
+                return;
             }
+            let leg = match open_agent(
+                client.clone(),
+                options.subject.clone(),
+                session.agent.clone(),
+                options.scope.clone(),
+            )
+            .await
+            {
+                Ok(leg) if !leg.effective_capabilities().is_empty() => leg,
+                Ok(_) => {
+                    app.notice = Some(Notice::refusal(
+                        "broker grants no capabilities; no command will be sent",
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    app.notice = Some(Notice::refusal(error.to_string()));
+                    return;
+                }
+            };
+            app.broker_trace = Some(leg.session_trace().to_string());
+            let limits = options.shell_limits;
+            let (sender, receiver) = session_channel();
+            stop.reset();
+            let (handle_cancel, signal) = CancelSignal::pair();
+            stop.bind_broker(handle_cancel);
+            app.busy = true;
+            let previous = std::mem::replace(history, History::new(options.history_limits));
+            let handle = tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let outcome = Interpreter::new(limits)
+                        .run(&line, &LegHandle(Arc::new(leg.with_cancel_signal(signal))));
+                    if sender
+                        .send(SessionEvent::ShellFinished(ShellEntry {
+                            input: line,
+                            output: outcome.output,
+                            exit_code: outcome.exit_code.get(),
+                        }))
+                        .is_err()
+                    {
+                        tracing::debug!("shell output lost because the terminal closed");
+                    }
+                    previous
+                })
+                .await
+                .map_err(SessionError::Task)
+            });
+            *running = Some(RunningTurn {
+                events: receiver,
+                handle,
+                shell: true,
+            });
         }
     }
+}
+
+/// Closes the transcript when a fresh gate or model setup refuses before inference.
+fn refuse_turn(app: &mut App, message: String) {
+    app.on_session_event(SessionEvent::Finished(Box::new(Err(message.clone()))));
+    app.notice = Some(Notice::refusal(message));
 }
 
 /// The agent's standing orders, handed to the model fresh on every turn.

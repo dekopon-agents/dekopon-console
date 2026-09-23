@@ -10,19 +10,22 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::HashSet,
     error::Error as _,
     io::{self, IsTerminal as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use clap::Parser;
 use dekopon_config::load_discovered;
-use dekopon_core::ExternalSubject;
+use dekopon_core::{AgentId, ExternalSubject};
+use dekopon_tui::OperatorProfile;
 use dekopon_tui::{
     App, ConsoleOptions, ModelChoice,
-    session::{TRACE_PREFIX, connect, resolve_console_credential},
+    session::{connect, resolve_console_credential},
 };
+use serde::Deserialize;
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
 
@@ -65,9 +68,30 @@ struct Cli {
     #[arg(long, value_name = "SUBJECT", env = "DEKOPON_CONSOLE_SUBJECT")]
     subject: Option<ExternalSubject>,
 
-    /// Model name handed to the backend.
-    #[arg(long, value_name = "MODEL", default_value = DEFAULT_MODEL)]
-    model: String,
+    /// Exact catalog agent to enter directly; otherwise use the picker.
+    #[arg(long, value_name = "AGENT")]
+    agent: Option<AgentId>,
+
+    /// Operator-authored, read-only profile document.
+    #[arg(long, value_name = "PATH")]
+    profiles: Option<PathBuf>,
+
+    /// Name of one authored profile, bound to its agent.
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "profiles",
+        conflicts_with = "subject"
+    )]
+    profile: Option<String>,
+
+    /// Model override; otherwise profile model, then the console default.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<String>,
+
+    /// Idle container PID1: wait for termination; no catalog, broker or model setup.
+    #[arg(long, conflicts_with_all = ["config", "socket", "server_uid", "subject", "agent", "profile", "profiles", "model", "endpoint", "api_key_env", "auth_file", "max_steps", "max_capability_calls"])]
+    idle: bool,
 
     /// ChatGPT credential file.
     ///
@@ -86,12 +110,12 @@ struct Cli {
     api_key_env: Option<String>,
 
     /// Maximum model turns one session may take.
-    #[arg(long, value_name = "COUNT", default_value_t = 8)]
-    max_steps: u32,
+    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=64))]
+    max_steps: Option<u32>,
 
     /// Capability invocations one session may drive in total.
-    #[arg(long, value_name = "COUNT", default_value_t = 16)]
-    max_capability_calls: u32,
+    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=256))]
+    max_capability_calls: Option<u32>,
 
     /// Disable ANSI colors in diagnostics.
     #[arg(long)]
@@ -122,30 +146,21 @@ enum ConsoleError {
     Runtime(#[source] io::Error),
     /// No subject was supplied.
     #[error(
-        "no console subject: pass --subject <SUBJECT> or set DEKOPON_CONSOLE_SUBJECT, for example \
-         dev.console.{}. The broker must also set allowDevelopmentSubjects, hold an attestor grant \
-         covering that namespace, and map the subject to a principal",
-        whoami()
+        "no console identity: pass --subject <SUBJECT>, set DEKOPON_CONSOLE_SUBJECT, or select an authored --profile / defaultProfile; the broker must map the subject and authorize this console UID"
     )]
     NoSubject,
-}
-
-/// A plausible name for the example in the missing-subject refusal.
-///
-/// Cosmetic: an operator reading `dev.console.<their own name>` copies it, where a placeholder is
-/// one more thing to work out. It never becomes a default, because an identity nobody chose is an
-/// identity the broker would refuse having explained nothing.
-fn whoami() -> String {
-    std::env::var("USER")
-        .ok()
-        .filter(|user| !user.is_empty() && user.chars().all(|c| c.is_ascii_alphanumeric()))
-        .map_or_else(|| "you".to_owned(), |user| user.to_ascii_lowercase())
+    #[error("profile configuration: {0}")]
+    Profile(String),
+    #[error("unknown agent {0} in the catalog")]
+    UnknownAgent(AgentId),
+    #[error("the interactive console needs a TTY on stdin and stdout (use kubectl exec -it)")]
+    NoTerminal,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     initialize_tracing(cli.verbose, cli.no_color);
-    match execute(&cli) {
+    match if cli.idle { idle() } else { execute(&cli) } {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -167,20 +182,127 @@ fn main() -> ExitCode {
 /// credential guard refuses. Once the console is drawing, only a terminal failure comes back here:
 /// a refused hop or a failed session is something the console shows and stays open after.
 fn execute(cli: &Cli) -> Result<(), ConsoleError> {
-    // Command-line facts first, filesystem facts second. A missing subject is not something an
-    // operator fixes by finding a catalog, so reporting the catalog's absence ahead of it would
-    // send them to the wrong problem.
-    let subject = cli.subject.clone().ok_or(ConsoleError::NoSubject)?;
+    let document = match &cli.profiles {
+        Some(path) => read_profiles(path)?,
+        None => ProfilesDocument::default(),
+    };
+    let chosen = cli.profile.as_ref().or_else(|| {
+        if cli.agent.is_none() {
+            document.default_profile.as_ref()
+        } else {
+            None
+        }
+    });
+    if cli.profile.is_some()
+        && !document
+            .profiles
+            .iter()
+            .any(|p| Some(&p.name) == cli.profile.as_ref())
+    {
+        return Err(ConsoleError::Profile(format!(
+            "unknown profile {}",
+            cli.profile.as_deref().unwrap_or_default()
+        )));
+    }
+    let matching: Vec<_> = cli
+        .agent
+        .as_ref()
+        .map(|agent| {
+            document
+                .profiles
+                .iter()
+                .filter(|p| &p.agent == agent)
+                .collect()
+        })
+        .unwrap_or_default();
+    if cli.agent.is_some() && cli.profile.is_none() && matching.len() > 1 {
+        return Err(ConsoleError::Profile(
+            "multiple profiles for --agent; select --profile".into(),
+        ));
+    }
+    let initial = chosen
+        .and_then(|name| document.profiles.iter().find(|p| &p.name == name))
+        .or_else(|| {
+            if cli.profile.is_none() {
+                matching.first().copied()
+            } else {
+                None
+            }
+        });
+    if cli.subject.is_some() && initial.is_some() {
+        return Err(ConsoleError::Profile(
+            "--subject cannot override a selected profile; remove defaultProfile or --subject"
+                .into(),
+        ));
+    }
+    if let (Some(agent), Some(profile)) = (&cli.agent, initial)
+        && agent != &profile.agent
+    {
+        return Err(ConsoleError::Profile(format!(
+            "--agent {agent} conflicts with profile {} bound to {}",
+            profile.name, profile.agent
+        )));
+    }
+    if cli.subject.is_none() && initial.is_none() && cli.agent.is_none() {
+        return Err(ConsoleError::NoSubject);
+    }
     let catalog = load_discovered(cli.config.clone())
         .map_err(|error| ConsoleError::Config(Box::new(error)))?;
+    if let Some(agent) = &cli.agent
+        && catalog.agent(agent).is_none()
+    {
+        return Err(ConsoleError::UnknownAgent(agent.clone()));
+    }
+    for profile in &document.profiles {
+        if catalog.agent(&profile.agent).is_none() {
+            return Err(ConsoleError::UnknownAgent(profile.agent.clone()));
+        }
+    }
+    let subject = initial
+        .map(|p| p.subject.clone())
+        .or_else(|| cli.subject.clone())
+        .ok_or(ConsoleError::NoSubject)?;
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(ConsoleError::NoTerminal);
+    }
     let agents = catalog.agents().cloned().collect();
 
-    let mut options = ConsoleOptions::new(subject.clone(), cli.model.clone());
+    let mut options = ConsoleOptions::new(
+        subject.clone(),
+        cli.model
+            .clone()
+            .or_else(|| initial.and_then(|p| p.model.clone()))
+            .unwrap_or_else(|| DEFAULT_MODEL.into()),
+    );
+    options.scope = initial.and_then(|p| p.scope.clone());
+    options.profiles = document.profiles.clone();
+    options.skills = catalog
+        .agents()
+        .filter_map(|agent| {
+            let id = agent.metadata.name.parse::<AgentId>().ok()?;
+            Some((id.clone(), catalog.agent_skills(&id).to_vec()))
+        })
+        .collect();
+    options.fixed_profile = cli.profile.clone();
+    options.initial_agent = cli.agent.clone().or_else(|| {
+        cli.profile
+            .as_ref()
+            .and_then(|_| initial.map(|p| p.agent.clone()))
+    });
+    options.model_override = cli.model.clone();
     options.catalog = cli.config.clone();
     options.socket = cli.socket.clone();
     options.server_uid = cli.server_uid;
-    options.prompt_limits.max_steps = cli.max_steps;
-    options.prompt_limits.max_capability_calls = cli.max_capability_calls;
+    options.prompt_limits.max_steps = cli
+        .max_steps
+        .or_else(|| initial.and_then(|p| p.max_steps))
+        .unwrap_or(8);
+    options.prompt_limits.max_capability_calls = cli
+        .max_capability_calls
+        .or_else(|| initial.and_then(|p| p.max_capability_calls))
+        .unwrap_or(16);
+    options.steps_override = cli.max_steps;
+    options.calls_override = cli.max_capability_calls;
     options.model_choice = match &cli.endpoint {
         Some(endpoint) => ModelChoice::OpenAiCompatible {
             endpoint: endpoint.clone(),
@@ -190,9 +312,6 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
             auth_file: cli.auth_file.clone(),
         },
     };
-
-    // Resolved before the screen opens, so the refusal an operator has to act on arrives as a line
-    // on their terminal rather than inside a full-screen frame they then have to quit out of.
     let credential = match &options.model_choice {
         ModelChoice::ChatGptSubscription { auth_file } => {
             resolve_console_credential(auth_file.as_deref())?
@@ -212,19 +331,103 @@ fn execute(cli: &Cli) -> Result<(), ConsoleError> {
 
     let (client, socket) = runtime.block_on(connect(&options))?;
     tracing::debug!(
-        trace_prefix = TRACE_PREFIX,
+        component = "dekopon-console",
         socket_tier = socket.tier().label(),
         "opening the console",
     );
 
-    let app = App::new(
+    let mut app = App::new(
         agents,
         subject.to_string(),
         socket.path().display().to_string(),
         credential,
     );
+    if let Some(agent) = &options.initial_agent {
+        app.selected_agent = app
+            .agents
+            .iter()
+            .position(|candidate| candidate.metadata.name == agent.as_str())
+            .expect("validated catalog agent");
+    }
+    app.profile = initial.map(|p| p.name.clone());
+    app.scope_label = options
+        .scope
+        .as_ref()
+        .map(|s| serde_json::to_string(s).expect("typed scope serializes"))
+        .unwrap_or_else(|| "subject-only".into());
+    app.model = options.model.clone();
     runtime.block_on(dekopon_tui::run(app, client, options))?;
     Ok(())
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProfilesDocument {
+    default_profile: Option<String>,
+    profiles: Vec<OperatorProfile>,
+}
+
+fn read_profiles(path: &Path) -> Result<ProfilesDocument, ConsoleError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| ConsoleError::Profile(format!("{}: {error}", path.display())))?;
+    let document: ProfilesDocument = serde_yaml_ng::from_str(&text)
+        .map_err(|error| ConsoleError::Profile(format!("{}: {error}", path.display())))?;
+    let mut names = HashSet::new();
+    for profile in &document.profiles {
+        if profile.name.is_empty()
+            || !profile
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || !names.insert(profile.name.as_str())
+        {
+            return Err(ConsoleError::Profile(format!(
+                "invalid or duplicate profile name: {}",
+                profile.name
+            )));
+        }
+        if profile.scope.as_ref().is_some_and(|scope| {
+            !scope.is_bounded()
+                || !scope
+                    .conversation
+                    .is_canonical_for(scope.kind, &profile.subject)
+        }) || profile
+            .model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty())
+            || profile.max_steps.is_some_and(|n| !(1..=64).contains(&n))
+            || profile
+                .max_capability_calls
+                .is_some_and(|n| !(1..=256).contains(&n))
+        {
+            return Err(ConsoleError::Profile(format!(
+                "invalid scope, model or bounds in profile {}",
+                profile.name
+            )));
+        }
+    }
+    if let Some(default) = &document.default_profile
+        && !names.contains(default.as_str())
+    {
+        return Err(ConsoleError::Profile(format!(
+            "defaultProfile {default} has no matching profile"
+        )));
+    }
+    Ok(document)
+}
+
+fn idle() -> Result<(), ConsoleError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(ConsoleError::Runtime)?;
+    runtime.block_on(async {
+        #[cfg(unix)] {
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(ConsoleError::Runtime)?;
+            tokio::select! { _ = term.recv() => {}, result = tokio::signal::ctrl_c() => result.map_err(ConsoleError::Runtime)?, }
+        }
+        Ok(())
+    })
 }
 
 /// Sends diagnostics to standard error, or to a sink when that is the screen this process is about
