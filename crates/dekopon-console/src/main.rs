@@ -54,7 +54,7 @@ struct Cli {
     socket: Option<PathBuf>,
 
     /// Trusted UID owning the broker process; defaults to the caller's own.
-    #[arg(long, value_name = "UID")]
+    #[arg(long, value_name = "UID", env = "DEKOPON_BROKER_UID")]
     server_uid: Option<u32>,
 
     /// Canonical external subject sessions propose on behalf of.
@@ -94,7 +94,10 @@ struct Cli {
     telemetry: Option<PathBuf>,
 
     /// Idle container PID1: wait for termination; no catalog, broker or model setup.
-    #[arg(long, conflicts_with_all = ["config", "socket", "server_uid", "subject", "agent", "profile", "profiles", "model", "endpoint", "api_key_env", "auth_file", "max_steps", "max_capability_calls"])]
+    ///
+    /// Settings that read the environment are not in this list: a container sets them once for
+    /// `kubectl exec` sessions, and PID1 inherits the same environment.
+    #[arg(long, conflicts_with_all = ["config", "socket", "agent", "profile", "profiles", "model", "endpoint", "api_key_env", "auth_file", "max_steps", "max_capability_calls"])]
     idle: bool,
 
     /// ChatGPT credential file.
