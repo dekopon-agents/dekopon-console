@@ -1,8 +1,8 @@
 name: Homebrew tap
 
-# Points dekopon-agents/homebrew-tap's Formula/dekopon-console.rb at a published release. Without
-# the TAP_APP_* secrets (the same tap App core uses) it skips with a warning instead of failing a
-# release that already published.
+# Points dekopon-agents/homebrew-tap's Formula/dekopon-console.rb at a published release, with a
+# token from the org-wide dekopon-release App (org secrets DEKOPON_RELEASE_APP_ID/_KEY). Without
+# them it skips with a warning instead of failing a release that already published.
 
 on:
   workflow_call:
@@ -35,12 +35,12 @@ jobs:
       - name: Check tap credentials
         id: credential
         env:
-          TAP_APP_ID: ${{ secrets.TAP_APP_ID }}
-          TAP_APP_KEY_SET: ${{ secrets.TAP_APP_PRIVATE_KEY != '' }}
+          TAP_APP_ID: ${{ secrets.DEKOPON_RELEASE_APP_ID }}
+          TAP_APP_KEY_SET: ${{ secrets.DEKOPON_RELEASE_APP_KEY != '' }}
         run: |
           if [ -z "$TAP_APP_ID" ] || [ "$TAP_APP_KEY_SET" != "true" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::TAP_APP_ID or TAP_APP_PRIVATE_KEY is unset; skipping the Homebrew tap update."
+            echo "::warning::DEKOPON_RELEASE_APP_ID or DEKOPON_RELEASE_APP_KEY is unset; skipping the Homebrew tap update."
           else
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
@@ -49,8 +49,8 @@ jobs:
         if: steps.credential.outputs.present == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.TAP_APP_ID }}
-          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.DEKOPON_RELEASE_APP_ID }}
+          private-key: ${{ secrets.DEKOPON_RELEASE_APP_KEY }}
           owner: dekopon-agents
           repositories: homebrew-tap
 
