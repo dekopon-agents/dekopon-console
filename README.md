@@ -1,6 +1,28 @@
 # dekopon-console
 
-An operator-controlled interactive client of `dekopon-brokerd`. This branch implements the console session milestone, **not** packaging, chart enablement, or deployment. The broker alone maps subjects, authenticates the Unix peer UID, checks `agent.prompt` and provider grants, and holds provider credentials. Whoever can exec arbitrary code as the console UID can claim any subject/scope inside its broker attestor envelope; the profile picker is convenience, not authorization or Kubernetes user attribution.
+An operator-controlled interactive client of `dekopon-brokerd`. The broker alone maps subjects, authenticates the Unix peer UID, checks `agent.prompt` and provider grants, and holds provider credentials. Whoever can exec arbitrary code as the console UID can claim any subject/scope inside its broker attestor envelope; the profile picker is convenience, not authorization or Kubernetes user attribution.
+
+## Install
+
+```sh
+brew install dekopon-agents/tap/dekopon-console
+```
+
+Release archives for Linux x86_64/aarch64 and macOS arm64 are on the GitHub releases page, with
+provenance attestations. `ghcr.io/dekopon-agents/dekopon-console:<tag>` (linux/amd64, arm64) runs
+`dekopon-console --idle` as UID 65535; the core chart's `console.enabled` adds it to the Dekopon
+pod. Exec sessions read these from the container environment:
+
+| Variable | Flag |
+|---|---|
+| `DEKOPON_BROKER_SOCKET` | `--socket` |
+| `DEKOPON_BROKER_UID` | `--server-uid` |
+| `DEKOPON_CONFIG` | `--config` |
+| `DEKOPON_CONSOLE_SUBJECT` | `--subject` |
+
+```sh
+kubectl exec -it deploy/dekopon -c console -- dekopon-console
+```
 
 ## Run
 

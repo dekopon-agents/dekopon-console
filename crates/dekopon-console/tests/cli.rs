@@ -23,6 +23,7 @@ fn binary() -> Command {
     // The subject is the one setting with no default, and it reads the environment. A developer
     // machine that exports it would otherwise change what these tests assert.
     command.env_remove("DEKOPON_CONSOLE_SUBJECT");
+    command.env_remove("DEKOPON_BROKER_UID");
     command
 }
 
@@ -570,6 +571,9 @@ fn idle_starts_without_a_catalog_or_model_and_exits_on_sigterm() {
         .arg("--idle")
         .args(["--telemetry", "/nonexistent/ignored-by-idle.yaml"])
         .env("DEKOPON_BROKER_SOCKET", "/nonexistent/broker.sock")
+        .env("DEKOPON_BROKER_UID", "65532")
+        .env("DEKOPON_CONSOLE_SUBJECT", "discord.578258790881951745")
+        .env("DEKOPON_CONFIG", "/nonexistent/dekopon.yaml")
         .spawn()
         .expect("idle process starts");
     std::thread::sleep(std::time::Duration::from_secs(2));
