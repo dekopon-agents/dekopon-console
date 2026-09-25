@@ -46,16 +46,11 @@ fn write_private(path: &Path, contents: impl AsRef<[u8]>) {
 }
 
 async fn broker(mapped: bool) -> Option<BrokerFixture> {
-    broker_with_scope(mapped, true, false).await
-}
-
-async fn broker_with_scope(mapped: bool, scoped_grant: bool, asset: bool) -> Option<BrokerFixture> {
-    broker_with_telemetry(mapped, scoped_grant, asset, None).await
+    broker_with_telemetry(mapped, false, None).await
 }
 
 async fn broker_with_telemetry(
     mapped: bool,
-    scoped_grant: bool,
     asset: bool,
     endpoint: Option<&str>,
 ) -> Option<BrokerFixture> {
@@ -78,16 +73,17 @@ async fn broker_with_telemetry(
     write_private(&policy, br#"
 @id("console-agent")
 permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"agent.prompt", resource == Dekopon::Agent::"reviewer")
-when { context has via && context.via == "dekopon-console" };
+when { context.via == "dekopon-console" }
+unless { context has conversation && context.conversation.id != "d0123abc" };
 @id("console-empty")
 permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"agent.prompt", resource == Dekopon::Agent::"empty")
-when { context has via && context.via == "dekopon-console" };
+when { context.via == "dekopon-console" };
 @id("console-read")
 permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"cli-probe.upper", resource == Dekopon::Provider::"cli-probe")
-when { context has via && context.via == "dekopon-console" && context has agent && context.agent == "reviewer" };
+when { context.via == "dekopon-console" && context.agent == "reviewer" };
 @id("console-asset")
 permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"http-probe.purge", resource == Dekopon::Provider::"http-probe")
-when { context has via && context.via == "dekopon-console" && context has agent && context.agent == "reviewer" };
+when { context.via == "dekopon-console" && context.agent == "reviewer" };
 "#);
     let config = dir.path().join("broker.yaml");
     let assets_root = dir
@@ -118,39 +114,27 @@ when { context has via && context.via == "dekopon-console" && context has agent 
     } else {
         "{timeoutMs: 30000, maxOutputBytes: 65536}"
     };
-    let effect = if asset { "external-write" } else { "read-only" };
-    let risk = if asset { "High" } else { "Low" };
     let uid = rustix::process::geteuid().as_raw();
-    let chat_scopes = if scoped_grant {
-        "chatScopes:\n        - kind: slack\n          transport: operator\n          conversation: {kind: [directMessage], ids: [d0123abc]}"
-    } else {
-        "chatScopes: []"
-    };
     write_private(
         &config,
         format!(
             r#"apiVersion: dekopon.dev/brokerd/v1alpha1
 {asset_config}socketPath: {}
-brokerPrincipal: local-broker
-policyRevision: console-test
 policiesPath: {}
 providers: [{}]
 identities:
   - uid: {}
     principal: dekopon-console
-    actor: {{type: service, principal: dekopon-console}}
     attestor:
       namespaces: [slack.t0123abc]
-      {chat_scopes}
-identityMappings:
-  - subject: slack.t0123abc.u9xyz
-    principal: maintainer
-constraintSets:
-  {capability}:
-    provider: {provider}
-    effect: {effect}
-    risk: {risk}
-    constraints: {constraints}
+principals:
+  maintainer:
+    subjects: [slack.t0123abc.u9xyz]
+capabilities:
+  {provider}:
+    capabilities:
+      {capability}:
+        constraints: {constraints}
 "#,
             socket.display(),
             policy.display(),
@@ -362,7 +346,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         .is_err(),
         "namespace denied"
     );
-    let allowed_scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d0123abc"}}"#).expect("typed scope");
+    let allowed_scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d0123abc"},"trigger":"message"}"#).expect("typed scope");
     assert_eq!(
         open_agent(
             client.clone(),
@@ -376,7 +360,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         .len(),
         1
     );
-    let wrong_scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d9999xyz"}}"#).expect("typed scope");
+    let wrong_scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d9999xyz"},"trigger":"message"}"#).expect("typed scope");
     assert!(
         open_agent(
             client,
@@ -400,7 +384,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
 async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors() {
     // Run only with the separately supplied latest-main asset fixture; the published 0.19.0
     // probe broker test above does not imply support for unpublished broker model APIs.
-    let Some(fixture) = broker_with_scope(true, true, true).await else {
+    let Some(fixture) = broker_with_telemetry(true, true, None).await else {
         eprintln!("asset fixture env absent; integration not exercised");
         return;
     };
@@ -425,36 +409,6 @@ async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors()
         }
         assert_eq!(descriptors(), before, "completed effects left descriptors open");
     }).await.unwrap();
-}
-
-#[tokio::test]
-async fn empty_chat_scopes_downgrades_a_requested_scope_without_echoing_it() {
-    let Some(fixture) = broker_with_scope(true, false, false).await else {
-        eprintln!("broker fixture env absent; integration not exercised");
-        return;
-    };
-    let mut options = ConsoleOptions::new("slack.t0123abc.u9xyz".parse().unwrap(), "unused".into());
-    options.socket = Some(fixture.socket.clone());
-    options.server_uid = Some(rustix::process::geteuid().as_raw());
-    let (client, _) = connect(&options).await.expect("connected");
-    let scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d9999xyz"}}"#).unwrap();
-    let leg = open_agent(
-        client,
-        options.subject,
-        "reviewer".parse().unwrap(),
-        Some(scope),
-    )
-    .await
-    .expect("legacy broker silently strips scope");
-    assert_eq!(
-        leg.effective_capabilities().len(),
-        1,
-        "subject-only Cedar still permits absent scope in this regression fixture; homelab must forbid it"
-    );
-    assert!(
-        leg.chat_memory_surface().is_none(),
-        "no trusted chat scope survived"
-    );
 }
 
 #[tokio::test]

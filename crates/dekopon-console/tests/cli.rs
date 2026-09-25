@@ -225,7 +225,7 @@ fn profile_fixture(text: &str) -> (TempDir, std::path::PathBuf, std::path::PathB
     (dir, catalog, profiles)
 }
 
-const PROFILE: &str = "defaultProfile: family\nprofiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope:\n      kind: slack\n      transport: operator\n      conversation: {kind: directMessage, container: t0123abc, id: d0123abc}\n    model: test-model\n    maxSteps: 2\n    maxCapabilityCalls: 3\n";
+const PROFILE: &str = "defaultProfile: family\nprofiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope:\n      kind: slack\n      transport: operator\n      conversation: {kind: directMessage, container: t0123abc, id: d0123abc}\n      trigger: message\n    model: test-model\n    maxSteps: 2\n    maxCapabilityCalls: 3\n";
 
 #[test]
 fn authored_default_profile_is_accepted_without_subject_or_model_credential() {
@@ -325,7 +325,7 @@ fn malformed_profile_document_and_missing_default_are_refused() {
     for text in [
         "defaultProfile: missing\nprofiles: []\n",
         "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    maxSteps: 0\n",
-        "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope: {kind: slack, transport: operator, conversation: {kind: directMessage, id: d0123abc}}\n",
+        "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope: {kind: slack, transport: operator, conversation: {kind: directMessage, id: d0123abc}, trigger: message}\n",
         "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    unknownField: true\n",
         "profiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n",
     ] {
@@ -361,6 +361,46 @@ fn no_terminal_refuses_direct_selection_without_contacting_broker_or_model() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("TTY"), "{}", stderr(&output));
+}
+
+/// The chart's catalog: a ConfigMap mount, so every file is a symlink into `..data/`, one agent per
+/// `*.yaml` with its instructions in a `.md` beside it.
+#[test]
+fn an_agents_directory_in_dekopon_config_loads_every_agent_and_its_instructions_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("..data");
+    std::fs::create_dir(&data).unwrap();
+    for (name, text) in [
+        (
+            "lange-family.yaml",
+            "apiVersion: dekopon.dev/v1alpha1\nkind: Agent\nmetadata:\n  name: lange-family\nspec:\n  description: Family chat\n  instructionsFile: lange-family.md\n",
+        ),
+        ("lange-family.md", "Answer the family kindly.\n"),
+        ("reviewer.yaml", CATALOG),
+    ] {
+        std::fs::write(data.join(name), text).unwrap();
+        std::os::unix::fs::symlink(Path::new("..data").join(name), dir.path().join(name)).unwrap();
+    }
+
+    for agent in ["lange-family", "reviewer"] {
+        let output = binary()
+            .env("DEKOPON_CONFIG", dir.path())
+            .args(["--subject", "slack.t0123abc.u9xyz", "--agent", agent])
+            .args(["--endpoint", "http://127.0.0.1:9/v1"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(stderr(&output).contains("TTY"), "{}", stderr(&output));
+    }
+    let catalog = dekopon_config::LocalCatalog::load(dir.path()).unwrap();
+    let family = catalog
+        .agents()
+        .find(|agent| agent.metadata.name == "lange-family")
+        .unwrap();
+    assert_eq!(
+        family.spec.instructions.as_deref(),
+        Some("Answer the family kindly.\n")
+    );
 }
 
 #[test]
@@ -409,13 +449,13 @@ fn pty_broker_fixture() -> Option<PtyBroker> {
     let socket = dir.path().join("broker.sock");
     for (path, bytes) in [
         (&component, std::fs::read(wasm).unwrap()),
-        (&policy, br#"permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"agent.prompt", resource == Dekopon::Agent::"reviewer") when { context has via && context.via == "dekopon-console" };
-permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"cli-probe.upper", resource == Dekopon::Provider::"cli-probe") when { context has via && context.via == "dekopon-console" && context has agent && context.agent == "reviewer" };"#.to_vec()),
+        (&policy, br#"@id("console-agent") permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"agent.prompt", resource == Dekopon::Agent::"reviewer") when { context.via == "dekopon-console" };
+@id("console-read") permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"cli-probe.upper", resource == Dekopon::Provider::"cli-probe") when { context.via == "dekopon-console" && context.agent == "reviewer" };"#.to_vec()),
     ] {
         std::fs::write(path, bytes).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    std::fs::write(&config, format!("apiVersion: dekopon.dev/brokerd/v1alpha1\nsocketPath: {}\nbrokerPrincipal: local-broker\npolicyRevision: console-cli-test\npoliciesPath: {}\nproviders: [{}]\nidentities:\n  - uid: {}\n    principal: dekopon-console\n    actor: {{type: service, principal: dekopon-console}}\n    attestor:\n      namespaces: [slack.t0123abc]\nidentityMappings:\n  - subject: slack.t0123abc.u9xyz\n    principal: maintainer\nconstraintSets:\n  cli-probe.upper:\n    provider: cli-probe\n    effect: read-only\n    risk: Low\n    constraints: {{timeoutMs: 30000, maxOutputBytes: 65536}}\n", socket.display(), policy.display(), component.display(), rustix::process::geteuid().as_raw())).unwrap();
+    std::fs::write(&config, format!("apiVersion: dekopon.dev/brokerd/v1alpha1\nsocketPath: {}\npoliciesPath: {}\nproviders: [{}]\nidentities:\n  - uid: {}\n    principal: dekopon-console\n    attestor:\n      namespaces: [slack.t0123abc]\nprincipals:\n  maintainer:\n    subjects: [slack.t0123abc.u9xyz]\ncapabilities:\n  cli-probe:\n    capabilities:\n      cli-probe.upper:\n        constraints: {{timeoutMs: 30000, maxOutputBytes: 65536}}\n", socket.display(), policy.display(), component.display(), rustix::process::geteuid().as_raw())).unwrap();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let log = std::fs::File::create(dir.path().join("broker.log")).unwrap();
     let mut child = Command::new(broker)

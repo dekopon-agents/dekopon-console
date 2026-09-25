@@ -1,11 +1,5 @@
-//! Declared versus effective: what the catalog says an agent may propose, beside what policy
-//! actually grants it.
-//!
-//! This is the pane worth having. A capability the catalog declares and the broker withholds is
-//! the answer to "why did the agent say it couldn't do that", and nothing else in the system shows
-//! the two lists side by side.
-
-use std::collections::BTreeMap;
+//! What policy actually grants the attested subject through the open agent. The catalog declares
+//! no capabilities; the broker's answer is the whole surface.
 
 use ratatui::{
     Frame,
@@ -35,49 +29,18 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let [table_area, words_area] =
         Layout::vertical([Constraint::Min(4), Constraint::Length(4)]).areas(area);
 
-    let effective: BTreeMap<&str, &dekopon_agent::meta::EffectiveCapabilityView> = session
-        .effective
-        .iter()
-        .map(|view| (view.id.as_str(), view))
-        .collect();
-    let declared: Vec<String> = app
-        .agents
-        .iter()
-        .find(|agent| agent.metadata.name == session.agent.as_str())
-        .map(|agent| {
-            agent
-                .spec
-                .capabilities
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut granted: Vec<&dekopon_agent::meta::EffectiveCapabilityView> =
+        session.effective.iter().collect();
+    granted.sort_unstable_by(|left, right| left.id.cmp(&right.id));
 
-    // Every identifier from either side, so a capability policy grants that the catalog never
-    // declared is as visible as one the catalog declared and policy withheld.
-    let mut identifiers: Vec<&str> = declared.iter().map(String::as_str).collect();
-    identifiers.extend(effective.keys().copied());
-    identifiers.sort_unstable();
-    identifiers.dedup();
-
-    let rows = identifiers.into_iter().map(|id| {
-        let granted = effective.get(id);
-        let is_declared = declared.iter().any(|declared| declared == id);
-        let (mark, style) = match (granted, is_declared) {
-            (Some(view), _) => ("granted", Style::default().fg(Theme::effect(&view.effect))),
-            (None, true) => ("denied", Style::default().fg(Theme::DENIED)),
-            (None, false) => ("-", Style::default().fg(Theme::FORGOTTEN)),
-        };
+    let rows = granted.into_iter().map(|view| {
         Row::new(vec![
-            Cell::from(sanitize_line(id)),
-            Cell::from(if is_declared { "yes" } else { "no" }),
-            Cell::from(mark),
-            Cell::from(granted.map_or("-", |view| view.effect.as_str()).to_owned()),
-            Cell::from(granted.map_or("-", |view| view.risk.as_str()).to_owned()),
-            Cell::from(granted.map_or_else(String::new, |view| sanitize_line(&view.description))),
+            Cell::from(sanitize_line(&view.id)),
+            Cell::from(view.effect.as_str().to_owned()),
+            Cell::from(view.risk.as_str().to_owned()),
+            Cell::from(sanitize_line(&view.description)),
         ])
-        .style(style)
+        .style(Style::default().fg(Theme::effect(&view.effect)))
     });
 
     let title = if session.is_empty() {
@@ -94,23 +57,14 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             rows,
             [
                 Constraint::Length(34),
-                Constraint::Length(9),
-                Constraint::Length(8),
                 Constraint::Length(15),
                 Constraint::Length(7),
                 Constraint::Min(10),
             ],
         )
         .header(
-            Row::new(vec![
-                "CAPABILITY",
-                "DECLARED",
-                "POLICY",
-                "EFFECT",
-                "RISK",
-                "DESCRIPTION",
-            ])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+            Row::new(vec!["CAPABILITY", "EFFECT", "RISK", "DESCRIPTION"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title(title)),
         table_area,

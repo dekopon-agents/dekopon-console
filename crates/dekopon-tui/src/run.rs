@@ -495,7 +495,7 @@ async fn dispatch_in_context(
                 }
             };
             app.broker_trace = Some(leg.session_trace().to_string());
-            let model: Arc<dyn ChatModel + Send + Sync> = match build_model(options) {
+            let model: Arc<dyn ChatModel + Send + Sync> = match build_model(options, stop) {
                 Ok(model) => Arc::from(model),
                 Err(error) => {
                     refuse_turn(app, error.to_string());
