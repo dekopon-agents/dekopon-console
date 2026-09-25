@@ -402,9 +402,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-agent"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dddc14aef62c2d6607327de17ef3e7438e051a0e6c6dec0512bfda634115a3d"
+checksum = "4ffd354537b0f324dc0ab76fb9782daab75dfd621ee058bb7e53de68f549e733"
 dependencies = [
  "dekopon-broker-protocol",
  "dekopon-config",
@@ -423,9 +423,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-broker-protocol"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd1299c42bbb2d9454079a7e9f56ec8f5507129985e1ff0f10051ae9491d2d66"
+checksum = "73094d134ae765f37be2ed54cb58105affb61377dd319494bc3d260c0bb6b946"
 dependencies = [
  "dekopon-capability",
  "dekopon-core",
@@ -439,9 +439,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-capability"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2ab315c1ef843bbd7776c8f2b2a09446e85a817b59dd2c4e2292a0a17b00714"
+checksum = "1fcac0a70c35ae8a2eabe0644dd552cc5b745add92f72ce85ec06ecd74b04d1e"
 dependencies = [
  "dekopon-core",
  "serde",
@@ -451,9 +451,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-config"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d5ffc95bae9de28e2f5d878905158848bac5ee43b21f4ec17aef2115bd145dd"
+checksum = "781dfd7a59bf8d175f97445c16012dbca9a93c4b872bf7a706993d2aa48bd25f"
 dependencies = [
  "dekopon-core",
  "dekopon-protocol",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "dekopon-console"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "dekopon-config",
@@ -484,37 +484,42 @@ dependencies = [
 
 [[package]]
 name = "dekopon-core"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b19a015d143bcd26f2fbe7a142731fe81fab90c11c1c5e37afa534d10ffb177c"
+checksum = "172f4a85d576c38854fbe0b1434885e471d25fe86fde367ff384a8543dd206f7"
 dependencies = [
  "base64 0.23.1",
  "libc",
  "serde",
+ "serde_yaml_ng",
  "thiserror",
 ]
 
 [[package]]
 name = "dekopon-model"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa1640e9000357c2e308acd0f1ec491a7934cfba956174230fa7b66ed41a00dd"
+checksum = "3fdaa6f2f946fee6735e934dbceb65b196e2b840b1e1f9776853f57412123f46"
 dependencies = [
  "base64 0.23.1",
  "dekopon-core",
+ "futures-util",
+ "http",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "ureq",
 ]
 
 [[package]]
 name = "dekopon-process"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6a3192bf65a75df84a1b7107dd5576e52e564fb1c3ec1dc3cdf7fdbc801c512"
+checksum = "a681cb302a36a8014b90bff395845069958f88b495e0d1c9824951adb3b6688e"
 dependencies = [
  "async-trait",
  "tokio",
@@ -523,9 +528,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-protocol"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "feb83e92d13521c8268dd13280dc3d9da0c8f919e70548b84c29d05563a0c0fb"
+checksum = "f899b4eef2886de16c47bc6356fd8c50b68085169837292350d26315317567ae"
 dependencies = [
  "dekopon-core",
  "serde",
@@ -533,9 +538,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-provider-sdk"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae336355882d0885e86b56635396dafa4782312c48478d020c2e49528ba772b"
+checksum = "f0dc547f3978847838fac6deab425014413328fa2b6584cfaea2ad1ca3b995dd"
 dependencies = [
  "dekopon-capability",
  "dekopon-core",
@@ -546,9 +551,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-shell"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39acae7e68f6663a43e86fbe09a1adfcc13591ff430f2f6e8f1fee9141c80a9f"
+checksum = "83c9e2e44f5287c95a1c03b02bbc3051392df287309dcc1e5ea5ac3b5aea2d78"
 dependencies = [
  "base64 0.23.1",
  "dekopon-core",
@@ -563,9 +568,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-telemetry"
-version = "0.19.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e8488a0591b98816df490c1a8281336c956ceaf0d9e7d37bce05f523155dc9e"
+checksum = "a693db07d1c79ab9ff946997c16e2e534b78f6fec25cdfe81c521155083b1982"
 dependencies = [
  "async-trait",
  "opentelemetry",
@@ -681,7 +686,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -925,6 +930,12 @@ name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
+
+[[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
@@ -1473,9 +1484,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opentelemetry"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
+checksum = "6cdb0b1b267eb9db3331b434ed9ddab10d50e280a9adf9d13e5233e2002b61b5"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -1487,9 +1498,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-appender-tracing"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c0080f0dc1d7c786f467cd85a4e395fcab11ee852004f39a29a18ab7c25d837"
+checksum = "e2b304e8d8f11326ba366a99ca5c7aaf7cd397b67268a332437175aeb42a40db"
 dependencies = [
  "opentelemetry",
  "tracing",
@@ -1499,9 +1510,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-http"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5683015d09e2df236ef005b17f6f196f0d5f6313c4fa43a7b6a53b52776e4331"
+checksum = "ee2c3625b8aa04209f7e01e513bc8044da9687fa38a9eacf59628ca5f3b87300"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1511,11 +1522,12 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-otlp"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
+checksum = "699a67345e21962a231955b9059a157e428b219fa5df8efe11f08346fb23a344"
 dependencies = [
  "http",
+ "httpdate",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-proto",
@@ -1529,9 +1541,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-proto"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638"
+checksum = "25da1ac11a0aeccf38d7f77ee0348715adaf8340f65ad46c94a02c6b20e2f65d"
 dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
@@ -1542,9 +1554,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry_sdk"
-version = "0.32.1"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
+checksum = "cb39533d9d1c912123efd7d41d7e0c29d16917b60ce15b4c8d87cb1af7f67520"
 dependencies = [
  "futures-channel",
  "futures-executor",
@@ -1787,7 +1799,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2046,7 +2058,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2345,10 +2357,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2643,9 +2655,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adbc64cba7137545b8044cb1fe9814f7aacf3c6b5f9b45be8bb5db538befdb26"
+checksum = "0a904802a1b902f43638b677ff2a650847e3b4404101b6c586d648e8c1e3e8fe"
 dependencies = [
  "js-sys",
  "opentelemetry",

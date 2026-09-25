@@ -40,7 +40,6 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     .as_deref()
                     .map_or_else(|| "-".to_owned(), sanitize_line),
             ),
-            Cell::from(agent.spec.capabilities.len().to_string()),
             Cell::from(sanitize_line(&agent.spec.description)),
         ])
         .style(style)
@@ -53,20 +52,12 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Constraint::Length(24),
             Constraint::Length(9),
             Constraint::Length(12),
-            Constraint::Length(5),
             Constraint::Min(10),
         ],
     )
     .header(
-        Row::new(vec![
-            "",
-            "NAME",
-            "STATUS",
-            "MODEL CLASS",
-            "CAPS",
-            "DESCRIPTION",
-        ])
-        .style(Style::default().add_modifier(Modifier::BOLD)),
+        Row::new(vec!["", "NAME", "STATUS", "MODEL CLASS", "DESCRIPTION"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(
         Block::default()

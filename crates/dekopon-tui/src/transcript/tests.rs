@@ -146,6 +146,7 @@ fn token_accounting_distinguishes_unreported_from_zero() {
     transcript.absorb(SessionEvent::ModelUsage(Some(ModelUsage {
         input_tokens: Some(100),
         cached_input_tokens: None,
+        cache_write_tokens: None,
         output_tokens: Some(20),
         reasoning_output_tokens: None,
         total_tokens: Some(120),
@@ -154,6 +155,7 @@ fn token_accounting_distinguishes_unreported_from_zero() {
     transcript.absorb(SessionEvent::ModelUsage(Some(ModelUsage {
         input_tokens: Some(50),
         cached_input_tokens: None,
+        cache_write_tokens: None,
         output_tokens: None,
         reasoning_output_tokens: None,
         total_tokens: None,

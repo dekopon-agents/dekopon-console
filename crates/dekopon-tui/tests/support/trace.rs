@@ -1,7 +1,7 @@
 //! Real Unix broker + pure Wasm provider + loopback model/OTLP. No external requests or credentials.
 use super::*;
 use dekopon_agent::prompt::History;
-use dekopon_model::model::OpenAiChatModel;
+use dekopon_model::{blocking::BlockingModel, inference::ModelClient, openai::OpenAiClient};
 use dekopon_telemetry::{
     Console, ConsoleFilter, ConsoleFormat, ConsoleWriter, ExporterSettings, Install, Transport,
 };
@@ -185,7 +185,7 @@ async fn console_turn_exports_one_causal_trace_through_model_script_broker_and_p
         return;
     }
     let collector = Loopback::start();
-    let mut fixture = broker_with_telemetry(true, true, false, Some(&collector.endpoint))
+    let mut fixture = broker_with_telemetry(true, false, Some(&collector.endpoint))
         .await
         .unwrap();
     let settings = ExporterSettings::new(
@@ -229,7 +229,8 @@ async fn console_turn_exports_one_causal_trace_through_model_script_broker_and_p
             // The same async opening boundary as dispatch; the leg must be born inside the turn.
             let leg = open_agent(client.clone(), options.subject.clone(), "reviewer".parse().unwrap(), None).await.unwrap();
             let trace = leg.session_trace().to_string();
-            let model = OpenAiChatModel::new(&collector.endpoint, "synthetic-model", Some("synthetic-model-credential".into()), Duration::from_secs(10)).unwrap().with_streaming(false);
+            let client = OpenAiClient::new(&collector.endpoint, "synthetic-model", Some("synthetic-model-credential".into()), Duration::from_secs(10)).unwrap().with_streaming(false);
+            let model = BlockingModel::new(Arc::new(ModelClient::OpenAiCompatible(client)), tokio::runtime::Handle::current(), tokio::sync::watch::channel(false).1, Duration::from_secs(10));
             let agent = serde_json::from_value(json!({"apiVersion":"dekopon.dev/v1alpha1", "kind":"Agent", "metadata":{"name":"reviewer"}, "spec":{"description":"synthetic agent", "enabled":true}})).unwrap();
             let (events, mut receiver) = dekopon_tui::session::session_channel();
             let progress = Arc::new(dekopon_tui::record::RecordingProgress::new(events.clone()));

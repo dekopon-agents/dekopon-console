@@ -23,11 +23,9 @@ fn agent(name: &str, description: &str) -> Agent {
             description: description.to_owned(),
             enabled: true,
             instructions: None,
-            capabilities: Vec::new(),
-            providers: Vec::new(),
             skills: Vec::new(),
             model_class: Some("reasoning".to_owned()),
-            policy_profile: None,
+            instructions_file: None,
         },
         status: None,
     }

@@ -16,11 +16,9 @@ fn agent(name: &str) -> Agent {
             description: "a fixture".to_owned(),
             enabled: true,
             instructions: None,
-            capabilities: Vec::new(),
-            providers: Vec::new(),
             skills: Vec::new(),
             model_class: None,
-            policy_profile: None,
+            instructions_file: None,
         },
         status: Default::default(),
     }

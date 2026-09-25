@@ -8,10 +8,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -32,8 +29,13 @@ use dekopon_broker_protocol::{
 use dekopon_config::Skill;
 use dekopon_core::{AgentId, ExternalSubject, SecretUseProposal};
 use dekopon_model::{
-    chatgpt::{self, ChatGptCodexModel, ChatGptError},
-    model::{ChatModel, ModelError, OpenAiChatModel},
+    blocking::BlockingModel,
+    chatgpt::{self, ChatGptError},
+    codex::CodexClient,
+    error::InferenceError,
+    inference::ModelClient,
+    model::ChatModel,
+    openai::OpenAiClient,
 };
 use dekopon_process::CancelHandle;
 use dekopon_protocol::Agent;
@@ -43,7 +45,7 @@ use dekopon_shell::{
 };
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::{mpsc::unbounded_channel, watch};
 
 use crate::{
     profile::OperatorProfile,
@@ -99,7 +101,7 @@ pub enum SessionError {
     ChatGpt(#[from] ChatGptError),
     /// The OpenAI-compatible client refused.
     #[error(transparent)]
-    Model(#[from] ModelError),
+    Model(#[from] InferenceError),
     /// An explicitly configured API-key environment variable was absent or empty.
     #[error("model credential variable {0} is absent or empty")]
     MissingApiKey(String),
@@ -378,14 +380,14 @@ impl CapabilityInvoker for NoDirect {
 /// than claim the turn was undone.
 #[derive(Clone, Default)]
 pub struct StopFlag {
-    requested: Arc<AtomicBool>,
+    requested: watch::Sender<bool>,
     broker: Arc<Mutex<Option<CancelHandle>>>,
 }
 
 impl StopFlag {
     /// Requests a stop at the session's next cooperative boundary.
     pub fn request(&self) {
-        self.requested.store(true, Ordering::Relaxed);
+        self.requested.send_replace(true);
         if let Some(handle) = self.broker.lock().expect("stop lock").as_ref() {
             handle.cancel();
         }
@@ -394,17 +396,23 @@ impl StopFlag {
     /// Whether a stop has been requested.
     #[must_use]
     pub fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::Relaxed)
+        *self.requested.borrow()
     }
 
     /// Clears the flag for the next session.
     pub fn reset(&self) {
-        self.requested.store(false, Ordering::Relaxed);
+        self.requested.send_replace(false);
         *self.broker.lock().expect("stop lock") = None;
     }
 }
 
 impl StopFlag {
+    /// The model client's view of Stop, so a request aborts the exchange in flight.
+    #[must_use]
+    pub fn model_cancel(&self) -> watch::Receiver<bool> {
+        self.requested.subscribe()
+    }
+
     /// Binds Stop to the current broker leg as well as the model loop.
     pub fn bind_broker(&self, handle: CancelHandle) {
         *self.broker.lock().expect("stop lock") = Some(handle);
@@ -417,22 +425,26 @@ impl CancellationProbe for StopFlag {
     }
 }
 
-/// Builds the model client this session talks to.
+/// Builds the model client this session talks to, bridged onto the blocking prompt loop with
+/// Stop as its cancellation.
 ///
 /// # Errors
 ///
 /// Returns the backend's own refusal, including the console's credential guard.
+/// Must be called on the Tokio runtime; the returned model blocks on it from the turn's blocking
+/// task.
 pub fn build_model(
     options: &ConsoleOptions,
+    stop: &StopFlag,
 ) -> Result<Box<dyn ChatModel + Send + Sync>, SessionError> {
-    match &options.model_choice {
+    let client = match &options.model_choice {
         ModelChoice::ChatGptSubscription { auth_file } => {
             let path = resolve_console_credential(auth_file.as_deref())?;
-            Ok(Box::new(ChatGptCodexModel::new(
+            ModelClient::Codex(CodexClient::new(
                 &options.model,
                 Some(&path),
                 options.model_timeout,
-            )?))
+            )?)
         }
         ModelChoice::OpenAiCompatible {
             endpoint,
@@ -447,14 +459,20 @@ pub fn build_model(
                         .ok_or_else(|| SessionError::MissingApiKey(name.clone()))
                 })
                 .transpose()?;
-            Ok(Box::new(OpenAiChatModel::new(
+            ModelClient::OpenAiCompatible(OpenAiClient::new(
                 endpoint,
                 &options.model,
                 bearer,
                 options.model_timeout,
-            )?))
+            )?)
         }
-    }
+    };
+    Ok(Box::new(BlockingModel::new(
+        Arc::new(client),
+        tokio::runtime::Handle::current(),
+        stop.model_cancel(),
+        options.model_timeout,
+    )))
 }
 
 /// One agent hop: the leg, its granted surface, and the conversation it accumulates.
