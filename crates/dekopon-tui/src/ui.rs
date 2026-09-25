@@ -11,7 +11,6 @@ pub mod chrome;
 pub mod detail;
 pub mod shell;
 pub mod theme;
-pub mod turns;
 
 use ratatui::{
     Frame,
@@ -37,7 +36,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.pane {
         Pane::Agents => agents::draw(frame, body, app),
         Pane::Detail => detail::draw(frame, body, app),
-        Pane::Turns => turns::draw(frame, body, app),
         Pane::Shell => shell::draw(frame, body, app),
     }
     chrome::draw_status(frame, status, app);
