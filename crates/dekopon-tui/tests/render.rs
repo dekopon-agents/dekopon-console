@@ -5,14 +5,8 @@
 //! thing an operator would otherwise have to guess.
 
 use dekopon_protocol::{Agent, AgentKind, AgentSpec, ApiVersion, ObjectMeta};
-use dekopon_tui::{
-    App, Mode, Notice, Pane, Payload, RevealedField,
-    record::{CallOutcome, CapabilityCall, ScriptRun, SessionEvent},
-    ui,
-};
+use dekopon_tui::{App, Mode, Notice, Pane, ui};
 use ratatui::{Terminal, backend::TestBackend};
-use serde_json::json;
-use std::time::Duration;
 
 fn agent(name: &str, description: &str) -> Agent {
     Agent {
@@ -133,114 +127,6 @@ fn hostile_agent_text_reaches_the_buffer_without_its_control_sequences() {
 }
 
 #[test]
-fn the_turn_pane_draws_the_call_tree_and_hides_the_secret_in_it() {
-    let mut app = console(Vec::new());
-    app.pane = Pane::Turns;
-    app.transcript.open("list the open issues".to_owned());
-    app.on_session_event(SessionEvent::ScriptStarted {
-        sequence: 0,
-        script: "gh issue list -R dekopon-agents/dekopon".to_owned(),
-    });
-    app.on_session_event(SessionEvent::Capability(Box::new(CapabilityCall {
-        sequence: 1,
-        capability: "gh.issue.list".to_owned(),
-        input: json!({"owner": "dekopon-agents", "token": "ghp_0123456789abcdefghijklmnop"}),
-        outcome: CallOutcome::Succeeded(json!([{"number": 47}])),
-        elapsed: Duration::from_millis(340),
-    })));
-    app.on_session_event(SessionEvent::ScriptFinished(Box::new(ScriptRun {
-        sequence: 0,
-        script: "gh issue list -R dekopon-agents/dekopon".to_owned(),
-        output: String::new(),
-        exit_code: 0,
-        truncated: false,
-        capability_calls: 1,
-        steps: 6,
-        elapsed: Duration::from_millis(400),
-    })));
-
-    let drawn = frame(&app);
-    assert!(
-        drawn.contains("list the open issues"),
-        "the prompt is missing"
-    );
-    assert!(drawn.contains("gh issue list"), "the script is missing");
-    assert!(drawn.contains("gh.issue.list"), "the capability is missing");
-    assert!(drawn.contains("succeeded"), "the outcome is missing");
-    assert!(
-        !drawn.contains("ghp_0123456789"),
-        "the token was drawn: {drawn}"
-    );
-    assert!(
-        drawn.contains("redacted"),
-        "the redaction was not announced"
-    );
-}
-
-#[test]
-fn a_revealed_field_is_actually_drawn_and_still_sanitised() {
-    // The counterpart to the test above: `r` is only "one keystroke against one field" if the
-    // field then appears. It was reachable from nothing before, so the value never appeared at all.
-    let mut app = console(Vec::new());
-    app.pane = Pane::Turns;
-    app.transcript.open("list the open issues".to_owned());
-    app.on_session_event(SessionEvent::ScriptStarted {
-        sequence: 0,
-        script: "gh issue list".to_owned(),
-    });
-    app.on_session_event(SessionEvent::Capability(Box::new(CapabilityCall {
-        sequence: 1,
-        capability: "gh.issue.list".to_owned(),
-        // The value carries an escape sequence, because a provider answer is attacker-controlled
-        // text and revealing it must not hand the terminal a cursor movement.
-        input: json!({"token": "ghp_0123456789abcdefghij\u{1b}[2Jwiped"}),
-        outcome: CallOutcome::Succeeded(json!([{"number": 47}])),
-        elapsed: Duration::from_millis(340),
-    })));
-
-    assert!(
-        !frame(&app).contains("ghp_0123456789"),
-        "nothing is revealed until the operator asks"
-    );
-
-    app.reveal(RevealedField {
-        call: (0, 0, 0),
-        payload: Payload::Input,
-        path: "token".to_owned(),
-    });
-    let drawn = frame(&app);
-    assert!(
-        drawn.contains("ghp_0123456789abcdefghij"),
-        "the revealed field was not drawn: {drawn}"
-    );
-    assert!(
-        !drawn.contains('\u{1b}'),
-        "a revealed value still goes through the terminal-control filter"
-    );
-    assert!(
-        drawn.contains("input.token"),
-        "a revealed value has to say which field it is: {drawn}"
-    );
-}
-
-#[test]
-fn a_denial_is_drawn_with_its_reason() {
-    let mut app = console(Vec::new());
-    app.pane = Pane::Turns;
-    app.transcript.open("merge it".to_owned());
-    app.on_session_event(SessionEvent::Capability(Box::new(CapabilityCall {
-        sequence: 0,
-        capability: "gh.pull-request.merge".to_owned(),
-        input: json!({"number": 7}),
-        outcome: CallOutcome::Denied("unconstrained-capability".to_owned()),
-        elapsed: Duration::from_millis(12),
-    })));
-
-    let drawn = frame(&app);
-    assert!(drawn.contains("unconstrained-capability"));
-}
-
-#[test]
 fn the_shell_pane_says_state_does_not_carry_over() {
     // Otherwise it is discovered by setting a variable and watching it vanish, which reads as a bug
     // in the interpreter rather than as how one script per line works.
@@ -272,32 +158,6 @@ fn a_refusal_is_drawn_on_the_status_line() {
     app.notice = Some(Notice::refusal("policy grants this subject nothing here"));
     let drawn = frame(&app);
     assert!(drawn.contains("policy grants this subject nothing here"));
-}
-
-#[test]
-fn a_forgotten_turn_is_marked_as_outside_the_replay_window() {
-    let mut app = console(Vec::new());
-    app.pane = Pane::Turns;
-    for index in 0..3 {
-        app.transcript.open(format!("question {index}"));
-        app.on_session_event(SessionEvent::Finished(Box::new(Ok(
-            dekopon_agent::prompt::PromptOutcome {
-                answer: format!("answer {index}"),
-                disposition: dekopon_agent::prompt::ReplyDisposition::Send,
-                model_turns: 1,
-                script_calls: 0,
-                capability_invocations: 0,
-                suggestions: Vec::new(),
-            },
-        ))));
-    }
-    app.on_session_complete(1);
-
-    let drawn = frame(&app);
-    assert!(
-        drawn.contains("outside the model's replay window"),
-        "the one thing no other surface can show must actually be drawn"
-    );
 }
 
 #[test]
@@ -335,4 +195,92 @@ fn selected_model_provenance_is_persistent_at_ordinary_widths() {
             }
         }
     }
+}
+
+fn shell_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(width as usize)
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn shell_command_output_and_prompt_share_one_wrapped_viewport() {
+    let mut app = console(Vec::new());
+    app.pane = Pane::Shell;
+    app.mode = Mode::Composing;
+    app.start_shell("echo abcdefghijklmnop".into());
+    let running = shell_rows(&app, 18, 19).join("\n");
+    assert_eq!(
+        running.matches("echo ").count(),
+        1,
+        "echo only once: {running}"
+    );
+    assert!(running.contains("[running"));
+    app.finish_shell(dekopon_tui::app::ShellEntry {
+        input: "echo abcdefghijklmnop".into(),
+        output: "漢字 test   spaced  \u{1b}[2Ktail\nxyz01234567890123456789".into(),
+        exit_code: Some(7),
+        truncated: true,
+    });
+    let rows = shell_rows(&app, 32, 22);
+    let drawn = rows.join("\n");
+    assert!(drawn.contains("echo abcdefghijklmnop"));
+    assert!(drawn.contains("test   spaced"), "{drawn}");
+    assert!(drawn.contains("[exit code: 7]"));
+    assert!(drawn.contains("[output truncated"));
+    assert!(!drawn.contains('\u{1b}'));
+    let prompt = rows.iter().rposition(|row| row.contains("│> ")).unwrap();
+    assert!(
+        prompt
+            > rows
+                .iter()
+                .position(|row| row.contains("truncated"))
+                .unwrap()
+    );
+}
+
+#[test]
+fn visual_row_paging_and_resize_clamp_without_losing_input() {
+    let mut app = console(Vec::new());
+    app.pane = Pane::Shell;
+    app.mode = Mode::Composing;
+    app.shell_viewport = (10, 5);
+    app.composer = "still typing".into();
+    for index in 0..12 {
+        app.start_shell(format!("cmd{index}長長長長"));
+        app.finish_shell(dekopon_tui::app::ShellEntry {
+            input: format!("cmd{index}長長長長"),
+            output: "a long unbroken output value  ".into(),
+            exit_code: Some(0),
+            truncated: false,
+        });
+    }
+    dekopon_tui::ui::shell::home(&mut app);
+    let first = shell_rows(&app, 12, 15).join("\n");
+    assert!(first.contains("cmd0"));
+    dekopon_tui::ui::shell::page(&mut app, 1);
+    let next = shell_rows(&app, 12, 15).join("\n");
+    assert!(
+        !next.contains("cmd0"),
+        "page should count wrapped rows: {next}"
+    );
+    assert_eq!(app.composer, "still typing");
+    app.shell_viewport = (38, 14);
+    dekopon_tui::ui::shell::page(&mut app, 1);
+    app.shell_top = None;
+    let bottom = shell_rows(&app, 40, 24).join("\n");
+    assert!(
+        bottom.contains("still typing"),
+        "End follows editable prompt: {bottom}"
+    );
 }

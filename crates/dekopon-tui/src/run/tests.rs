@@ -18,7 +18,7 @@ use std::sync::{
 
 use super::{Action, RunningTurn, TerminalGuard, dispatch, drive_event_loop, on_key};
 use crate::{
-    app::{App, Mode, Pane, Payload},
+    app::{App, Mode, Pane},
     profile::OperatorProfile,
     record::{CallOutcome, CapabilityCall, RecordingInvoker, Sequence, SessionEvent},
     session::{ConsoleOptions, StopFlag},
@@ -292,7 +292,7 @@ fn tab_cycles_panes_in_both_directions() {
     let mut app = console();
     let stop = StopFlag::default();
     on_key(&mut app, press(KeyCode::Tab), &stop);
-    assert_eq!(app.pane, Pane::Detail);
+    assert_eq!(app.pane, Pane::Shell);
     on_key(&mut app, press(KeyCode::BackTab), &stop);
     assert_eq!(app.pane, Pane::Agents);
 }
@@ -307,7 +307,7 @@ fn enter_on_the_agent_list_asks_to_hop() {
 }
 
 #[test]
-fn composing_collects_text_and_enter_submits_a_shell_line() {
+fn composing_preserves_a_refused_shell_line_without_an_agent() {
     let mut app = console();
     let stop = StopFlag::default();
     app.pane = Pane::Shell;
@@ -319,22 +319,19 @@ fn composing_collects_text_and_enter_submits_a_shell_line() {
     }
     assert_eq!(app.composer, "cap --list");
 
-    assert_eq!(
-        on_key(&mut app, press(KeyCode::Enter), &stop),
-        Some(Action::Shell("cap --list".to_owned()))
-    );
-    assert!(app.composer.is_empty());
-    assert_eq!(app.mode, Mode::Browsing);
+    assert_eq!(on_key(&mut app, press(KeyCode::Enter), &stop), None);
+    assert_eq!(app.composer, "cap --list");
+    assert!(app.notice.as_ref().is_some_and(|notice| notice.is_refusal));
+    assert_eq!(app.mode, Mode::Composing);
 }
 
 #[test]
 fn escape_while_composing_discards_rather_than_stopping_a_turn() {
     let mut app = console();
     let stop = StopFlag::default();
-    app.pane = Pane::Turns;
+    app.pane = Pane::Shell;
     app.mode = Mode::Composing;
     app.composer = "half a thought".to_owned();
-    app.busy = true;
 
     on_key(&mut app, press(KeyCode::Esc), &stop);
     assert_eq!(app.mode, Mode::Browsing);
@@ -529,11 +526,9 @@ async fn switching_profiles_clears_the_model_replay_and_visible_history() {
     app.selected_agent = 1;
     app.profile = Some("first".into());
     app.transcript.open("first profile secret".into());
-    app.shell_history.push(crate::app::ShellEntry {
-        input: "first profile shell".into(),
-        output: "secret".into(),
-        exit_code: 0,
-    });
+    app.start_shell("first profile shell".into());
+    app.fail_shell("old result");
+    app.busy = false;
     let directory = tempfile::tempdir().unwrap();
     let client = BrokerClient::new(
         directory.path().join("absent.sock"),
@@ -613,133 +608,6 @@ fn composing_is_only_offered_where_there_is_something_to_type_into() {
     );
 }
 
-/// A transcript holding two capability calls, the first of which carries a secret in each half.
-fn with_two_calls() -> App {
-    let mut app = console();
-    app.transcript.open("look".to_owned());
-    app.on_session_event(SessionEvent::ScriptStarted {
-        sequence: 0,
-        script: "gh issue list".to_owned(),
-    });
-    app.on_session_event(SessionEvent::Capability(Box::new(CapabilityCall {
-        sequence: 1,
-        capability: "gh.issue.list".to_owned(),
-        input: json!({"headers": {"authorization": "Bearer ghp_0123456789abcdefghij"}}),
-        outcome: CallOutcome::Succeeded(json!({"token": "ghs_zyxwvutsrqponmlkjihg"})),
-        elapsed: Duration::from_millis(5),
-    })));
-    app.on_session_event(SessionEvent::Capability(Box::new(CapabilityCall {
-        sequence: 2,
-        capability: "gh.issue.read".to_owned(),
-        input: json!({"number": 7}),
-        outcome: CallOutcome::Succeeded(json!({"title": "a bug"})),
-        elapsed: Duration::from_millis(4),
-    })));
-    app.pane = Pane::Turns;
-    app
-}
-
-#[test]
-fn o_expands_the_call_under_the_cursor_and_collapses_it_again() {
-    let mut app = with_two_calls();
-    let stop = StopFlag::default();
-
-    on_key(&mut app, press(KeyCode::Char('o')), &stop);
-    assert_eq!(
-        app.expanded_call,
-        Some((0, 0, 0)),
-        "the key the help overlay advertises has to reach the state it advertises"
-    );
-
-    on_key(&mut app, press(KeyCode::Char('o')), &stop);
-    assert_eq!(app.expanded_call, None, "pressing it again collapses");
-
-    // The cursor is what makes it act on *one* call, so moving it moves what `o` expands.
-    on_key(&mut app, press(KeyCode::Char('j')), &stop);
-    on_key(&mut app, press(KeyCode::Char('o')), &stop);
-    assert_eq!(app.expanded_call, Some((0, 0, 1)));
-}
-
-#[test]
-fn o_and_r_belong_to_the_turns_pane() {
-    let mut app = with_two_calls();
-    let stop = StopFlag::default();
-    app.pane = Pane::Agents;
-
-    on_key(&mut app, press(KeyCode::Char('o')), &stop);
-    on_key(&mut app, press(KeyCode::Char('r')), &stop);
-    assert_eq!(app.expanded_call, None);
-    assert!(app.revealed.is_empty());
-    // ...and `j` still moves the agent list there, rather than a cursor that pane cannot show.
-    assert_eq!(app.selected_call, 0);
-}
-
-#[test]
-fn r_reveals_one_field_per_keystroke_and_never_becomes_a_mode() {
-    let mut app = with_two_calls();
-    let stop = StopFlag::default();
-
-    on_key(&mut app, press(KeyCode::Char('r')), &stop);
-    assert_eq!(app.revealed.len(), 1, "one keystroke, one field");
-    assert!(app.is_revealed((0, 0, 0), Payload::Input, "headers.authorization"));
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|notice| notice.text.contains("scrollback")),
-        "the scrollback warning is the whole reason revealing is deliberate"
-    );
-
-    on_key(&mut app, press(KeyCode::Char('r')), &stop);
-    assert_eq!(app.revealed.len(), 2, "the next press takes the next field");
-    assert!(app.is_revealed((0, 0, 0), Payload::Output, "token"));
-
-    // Nothing left in this call, and saying so beats a keystroke that appears to do nothing.
-    on_key(&mut app, press(KeyCode::Char('r')), &stop);
-    assert_eq!(app.revealed.len(), 2);
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|notice| notice.text.contains("nothing left")),
-        "got: {:?}",
-        app.notice
-    );
-
-    // The second call carries no secret, and revealing the first one did not uncover it.
-    on_key(&mut app, press(KeyCode::Char('j')), &stop);
-    on_key(&mut app, press(KeyCode::Char('r')), &stop);
-    assert_eq!(app.revealed.len(), 2);
-}
-
-#[test]
-fn the_call_cursor_saturates_rather_than_wrapping() {
-    let mut app = with_two_calls();
-    let stop = StopFlag::default();
-
-    on_key(&mut app, press(KeyCode::Char('k')), &stop);
-    assert_eq!(app.selected_call, 0, "already at the top");
-    for _ in 0..5 {
-        on_key(&mut app, press(KeyCode::Char('j')), &stop);
-    }
-    assert_eq!(app.selected_call, 1, "two calls, so the last index is one");
-}
-
-#[test]
-fn o_and_r_say_so_when_there_is_no_call_to_act_on() {
-    let mut app = console();
-    let stop = StopFlag::default();
-    app.pane = Pane::Turns;
-
-    on_key(&mut app, press(KeyCode::Char('o')), &stop);
-    assert!(
-        app.notice.as_ref().is_some_and(|notice| notice.is_refusal),
-        "a key that cannot act has to say why, not look broken"
-    );
-
-    app.notice = None;
-    on_key(&mut app, press(KeyCode::Char('r')), &stop);
-    assert!(app.notice.as_ref().is_some_and(|notice| notice.is_refusal));
-}
-
 #[tokio::test]
 async fn profile_switches_preserve_cli_override_and_update_model_provenance() {
     use crate::session::{DEFAULT_MODEL, ModelSource};
@@ -806,4 +674,45 @@ async fn profile_switches_preserve_cli_override_and_update_model_provenance() {
             (expected, source)
         );
     }
+}
+
+#[test]
+fn shell_paging_works_while_composing_and_tab_remains_reachable() {
+    let mut app = console();
+    let stop = StopFlag::default();
+    app.pane = Pane::Shell;
+    app.mode = Mode::Composing;
+    app.shell_viewport = (10, 3);
+    app.composer = "typed command".into();
+    for index in 0..8 {
+        app.start_shell(format!("command {index} long"));
+        app.fail_shell("output of several visual rows");
+    }
+    on_key(&mut app, press(KeyCode::PageUp), &stop);
+    assert!(app.shell_top.is_some());
+    on_key(&mut app, press(KeyCode::Home), &stop);
+    assert_eq!(app.shell_top, Some(0));
+    on_key(&mut app, press(KeyCode::PageDown), &stop);
+    assert!(app.shell_top.unwrap_or_default() > 0);
+    on_key(&mut app, press(KeyCode::End), &stop);
+    assert_eq!(app.shell_top, None);
+    assert_eq!(app.composer, "typed command");
+    on_key(&mut app, press(KeyCode::Tab), &stop);
+    assert_eq!(app.pane, Pane::Detail);
+}
+
+#[test]
+fn busy_shell_refuses_second_submission_and_escape_requests_stop_while_typing() {
+    let mut app = console();
+    let stop = StopFlag::default();
+    app.pane = Pane::Shell;
+    app.mode = Mode::Composing;
+    app.start_shell("first".into());
+    app.composer = "second".into();
+    assert_eq!(on_key(&mut app, press(KeyCode::Enter), &stop), None);
+    assert_eq!(app.shell_history.len(), 1);
+    assert_eq!(app.composer, "second");
+    on_key(&mut app, press(KeyCode::Esc), &stop);
+    assert!(stop.is_requested());
+    assert_eq!(app.mode, Mode::Composing);
 }

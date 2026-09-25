@@ -163,6 +163,9 @@ async fn drive_event_loop(
     stop: &StopFlag,
 ) -> Result<(), ConsoleExit> {
     loop {
+        if let Ok(size) = terminal.size() {
+            app.shell_viewport = (size.width.saturating_sub(2), size.height.saturating_sub(10));
+        }
         if let Err(error) = terminal.draw(|frame| ui::draw(frame, app)) {
             stop_running(running, stop).await;
             return Err(ConsoleExit::Terminal(error));
@@ -182,6 +185,9 @@ async fn drive_event_loop(
                                  history, stop).await;
                     }
                 }
+                Some(Ok(Event::Resize(width, height))) => {
+                    app.shell_viewport = (width.saturating_sub(2), height.saturating_sub(10));
+                }
                 Some(Ok(_)) => {}
                 Some(Err(error)) => { stop_running(running, stop).await; return Err(ConsoleExit::Terminal(error)); },
                 None => { app.should_quit = true; },
@@ -189,7 +195,7 @@ async fn drive_event_loop(
             event = recv(running) => {
                 match event {
                     Some(SessionEvent::Progress(message)) => app.notice = Some(Notice::info(message)),
-                    Some(SessionEvent::ShellFinished(entry)) => app.push_shell(entry),
+                    Some(SessionEvent::ShellFinished(entry)) => app.finish_shell(entry),
                     Some(event) => app.on_session_event(event),
                     None => finish_turn(app, running, history, stop).await,
                 }
@@ -234,11 +240,20 @@ async fn finish_turn(
         Ok(Ok(returned)) => *history = returned,
         // The session's own history is lost, so the model's replay window is now a guess. Saying so
         // is better than silently continuing against a window that no longer matches the screen.
+        Ok(Err(error)) if shell => app.fail_shell(error.to_string()),
+        Err(error) if shell => app.fail_shell(format!("the shell task died: {error}")),
         Ok(Err(error)) => app.notice = Some(Notice::refusal(error.to_string())),
         Err(error) => app.notice = Some(Notice::refusal(format!("the session task died: {error}"))),
     }
     stop.reset();
     if shell {
+        if app
+            .shell_history
+            .last()
+            .is_some_and(|entry| entry.exit_code.is_none())
+        {
+            app.fail_shell("shell ended without reporting an outcome");
+        }
         app.busy = false;
     } else {
         app.on_session_complete(history.len());
@@ -277,8 +292,29 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
         app.mode = Mode::Browsing;
         return None;
     }
+    if app.pane == Pane::Shell {
+        match key.code {
+            KeyCode::PageUp => {
+                crate::ui::shell::page(app, -1);
+                return None;
+            }
+            KeyCode::PageDown => {
+                crate::ui::shell::page(app, 1);
+                return None;
+            }
+            KeyCode::Home => {
+                crate::ui::shell::home(app);
+                return None;
+            }
+            KeyCode::End => {
+                app.shell_top = None;
+                return None;
+            }
+            _ => {}
+        }
+    }
     if app.mode == Mode::Composing {
-        return on_composing_key(app, key);
+        return on_composing_key(app, key, stop);
     }
 
     match key.code {
@@ -288,15 +324,10 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
         KeyCode::BackTab => app.pane = app.pane.previous(),
         KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
         KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
-        KeyCode::Char('i') if matches!(app.pane, Pane::Turns | Pane::Shell) => {
+        KeyCode::Char('i') if app.pane == Pane::Shell => {
             app.mode = Mode::Composing;
         }
         KeyCode::Enter if app.pane == Pane::Agents => return Some(Action::Enter),
-        // The turns pane's own cursor. `o` and `r` are the two keys the help overlay has always
-        // advertised, and they act on one capability call at a time rather than on a selection
-        // mode: `r` uncovers the next still-hidden field of that one call and says so.
-        KeyCode::Char('o') if app.pane == Pane::Turns => app.toggle_cursor_call(),
-        KeyCode::Char('r') if app.pane == Pane::Turns => app.reveal_next(),
         // A stop is requested through the state machine first, so the console and the session agree
         // on whether there was anything to stop.
         KeyCode::Esc if app.request_stop() => stop.request(),
@@ -305,25 +336,51 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
     None
 }
 
-fn on_composing_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+fn on_composing_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
     match key.code {
+        KeyCode::Esc if app.request_stop() => stop.request(),
         KeyCode::Esc => {
             app.mode = Mode::Browsing;
             app.composer.clear();
         }
+        KeyCode::Tab => {
+            app.mode = Mode::Browsing;
+            app.pane = app.pane.next();
+        }
+        KeyCode::BackTab => {
+            app.mode = Mode::Browsing;
+            app.pane = app.pane.previous();
+        }
         KeyCode::Backspace => {
             app.composer.pop();
         }
-        KeyCode::Char(character) => app.composer.push(character),
+        KeyCode::Char(character)
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            app.composer.push(character)
+        }
         KeyCode::Enter => {
             return match app.pane {
                 Pane::Shell => {
+                    if app.busy {
+                        app.notice = Some(Notice::refusal(
+                            "another command is running; press Esc to stop it",
+                        ));
+                        return None;
+                    }
+                    if app.session.is_none() {
+                        app.notice = Some(Notice::refusal("hop into an agent first"));
+                        return None;
+                    }
                     let line = app.composer.trim().to_owned();
+                    if line.is_empty() {
+                        return None;
+                    }
                     app.composer.clear();
-                    app.mode = Mode::Browsing;
-                    (!line.is_empty()).then_some(Action::Shell(line))
+                    app.shell_top = None;
+                    Some(Action::Shell(line))
                 }
-                _ => app.submit_turn().map(Action::Turn),
+                _ => None,
             };
         }
         _ => {}
@@ -339,6 +396,9 @@ fn clear_agent_context(app: &mut App, history: &mut History, limits: HistoryLimi
     app.broker_trace = None;
     app.transcript = Default::default();
     app.shell_history.clear();
+    app.shell_top = None;
+    app.composer.clear();
+    app.mode = Mode::Browsing;
     *history = History::new(limits);
 }
 
@@ -546,23 +606,25 @@ async fn dispatch_in_context(
                 ));
                 return;
             }
+            let agent = session.agent.clone();
+            app.start_shell(line.clone());
             let leg = match open_agent(
                 client.clone(),
                 options.subject.clone(),
-                session.agent.clone(),
+                agent,
                 options.scope.clone(),
             )
             .await
             {
                 Ok(leg) if !leg.effective_capabilities().is_empty() => leg,
                 Ok(_) => {
-                    app.notice = Some(Notice::refusal(
-                        "broker grants no capabilities; no command will be sent",
-                    ));
+                    app.fail_shell("broker grants no capabilities; no command will be sent");
+                    app.busy = false;
                     return;
                 }
                 Err(error) => {
-                    app.notice = Some(Notice::refusal(error.to_string()));
+                    app.fail_shell(error.to_string());
+                    app.busy = false;
                     return;
                 }
             };
@@ -572,7 +634,6 @@ async fn dispatch_in_context(
             stop.reset();
             let (handle_cancel, signal) = CancelSignal::pair();
             stop.bind_broker(handle_cancel);
-            app.busy = true;
             let previous = std::mem::replace(history, History::new(options.history_limits));
             let span = tracing::Span::current();
             let handle = tokio::spawn(async move {
@@ -588,7 +649,8 @@ async fn dispatch_in_context(
                         .send(SessionEvent::ShellFinished(ShellEntry {
                             input: line,
                             output: outcome.output,
-                            exit_code: outcome.exit_code.get(),
+                            exit_code: Some(outcome.exit_code.get()),
+                            truncated: outcome.truncated,
                         }))
                         .is_err()
                     {

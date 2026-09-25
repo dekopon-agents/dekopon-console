@@ -1,20 +1,11 @@
-//! A prompt bound to the same capability seam the agent's own sessions dispatch through.
-//!
-//! Not a simulation of the agent's shell — literally it. The same [`dekopon_shell::Interpreter`],
-//! the same granted set, the same broker leg. What is refused here is refused there, for the same
-//! reason, and a script that works here is a script a model can run.
-//!
-//! What it shows is the interpreter's own combined output rather than the structured call tree the
-//! turn pane draws, because that tree is scoped to a turn and a line typed here belongs to no turn.
-//! An operator wanting a call's exact JSON runs it through a turn, or reads it back from the
-//! broker's audit chain under this session's trace prefix.
+//! Manual scripts and their results in one wrapped, pageable transcript.
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use super::Theme;
@@ -23,39 +14,81 @@ use crate::{
     redact::sanitize_line,
 };
 
-/// Draws the shell scrollback and its prompt.
-pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let [scrollback, prompt] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
+fn lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     for entry in &app.shell_history {
         lines.push(Line::from(vec![
-            Span::styled("$ ", Style::default().fg(Theme::READ_ONLY)),
+            Span::styled("> ", Style::default().fg(Theme::READ_ONLY)),
             Span::raw(sanitize_line(&entry.input)),
         ]));
-        for line in entry.output.lines() {
-            lines.push(Line::raw(sanitize_line(line)));
+        if !entry.output.is_empty() {
+            for line in entry.output.split('\n') {
+                lines.push(Line::raw(sanitize_line(line)));
+            }
         }
-        if entry.exit_code != 0 {
+        if let Some(exit) = entry.exit_code {
+            if exit != 0 {
+                lines.push(Line::styled(
+                    format!("[exit code: {exit}]"),
+                    Style::default().fg(Theme::DENIED),
+                ));
+            }
+            if entry.truncated {
+                lines.push(Line::styled(
+                    "[output truncated by interpreter limits]",
+                    Style::default().fg(Theme::DENIED),
+                ));
+            }
+        } else {
             lines.push(Line::styled(
-                format!("[exit code: {}]", entry.exit_code),
-                Style::default().fg(Theme::DENIED),
+                "[running · Esc requests stop]",
+                Style::default().fg(Theme::LOCAL_WRITE),
             ));
         }
     }
-    if lines.is_empty() {
-        lines.push(Line::styled(
-            "try: cap --list",
-            Style::default().fg(Theme::FORGOTTEN),
-        ));
-    }
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Theme::READ_ONLY)),
+        Span::raw(sanitize_line(&app.composer)),
+    ]));
+    lines
+}
 
-    let height = scrollback.height.saturating_sub(2) as usize;
-    let offset = lines.len().saturating_sub(height);
+fn paragraph(app: &App) -> Paragraph<'static> {
+    Paragraph::new(lines(app)).wrap(Wrap { trim: false })
+}
 
-    // Said in the frame rather than left to be discovered: the interpreter keeps no state between
-    // runs, so a variable set on one line is gone on the next.
+fn max_top(app: &App) -> usize {
+    let (width, height) = app.shell_viewport;
+    paragraph(app)
+        .line_count(width.max(1))
+        .saturating_sub(height as usize)
+}
+
+/// Pages by visible rows, including rows created by wrapping wide or Unicode content.
+pub fn page(app: &mut App, direction: isize) {
+    let end = max_top(app);
+    let top = app.shell_top.unwrap_or(end).min(end);
+    let distance = usize::from(app.shell_viewport.1.max(1));
+    let next = if direction < 0 {
+        top.saturating_sub(distance)
+    } else {
+        top.saturating_add(distance).min(end)
+    };
+    app.shell_top = (next != end).then_some(next);
+}
+
+/// Jumps to the first visual row.
+pub fn home(app: &mut App) {
+    app.shell_top = Some(0);
+}
+
+/// Draws the command, output, and editable trailing prompt in the same viewport.
+pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let inner = Block::bordered().inner(area);
+    let height = inner.height as usize;
+    let count = paragraph(app).line_count(inner.width.max(1));
+    let end = count.saturating_sub(height);
+    let top = app.shell_top.unwrap_or(end).min(end);
     let title = match &app.session {
         Some(session) => format!(
             " shell as {} · each line is its own script; variables do not carry over ",
@@ -63,23 +96,21 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ),
         None => " shell · hop into an agent first ".to_owned(),
     };
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((offset.min(u16::MAX as usize) as u16, 0))
-            .block(Block::default().borders(Borders::ALL).title(title)),
-        scrollback,
-    );
-
-    let (prompt_title, style) = if app.mode == Mode::Composing {
-        (" enter runs · esc cancels ", Style::default())
+    let title = sanitize_line(&title);
+    let hint = if app.mode == Mode::Composing {
+        " type · Enter runs · Tab switches · Esc leaves input "
     } else {
-        (" i to type ", Style::default().fg(Theme::FORGOTTEN))
+        " i to type · ? for keys "
     };
     frame.render_widget(
-        Paragraph::new(sanitize_line(&app.composer))
-            .style(style)
-            .block(Block::default().borders(Borders::ALL).title(prompt_title)),
-        prompt,
+        paragraph(app)
+            .scroll((top.min(u16::MAX as usize) as u16, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_bottom(hint),
+            ),
+        area,
     );
 }

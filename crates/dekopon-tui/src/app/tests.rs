@@ -255,23 +255,25 @@ fn revealing_is_per_field_and_says_where_the_secret_went() {
 #[test]
 fn shell_entries_accumulate_in_order() {
     let mut app = console();
-    app.push_shell(ShellEntry {
+    app.start_shell("cap --list".to_owned());
+    assert_eq!(app.shell_history[0].exit_code, None);
+    app.finish_shell(ShellEntry {
         input: "cap --list".to_owned(),
         output: "gh.issue.list".to_owned(),
-        exit_code: 0,
+        exit_code: Some(0),
+        truncated: false,
     });
-    app.push_shell(ShellEntry {
-        input: "nope".to_owned(),
-        output: "command not found".to_owned(),
-        exit_code: 127,
-    });
+    app.start_shell("nope".to_owned());
+    app.fail_shell("command not found");
 
     assert_eq!(app.shell_history.len(), 2);
-    assert_eq!(app.shell_history[1].exit_code, 127);
+    assert_eq!(app.shell_history[1].exit_code, Some(1));
+    assert_eq!(app.shell_history[0].input, "cap --list");
 }
 
 #[test]
 fn modes_default_to_browsing() {
     assert_eq!(Mode::default(), Mode::Browsing);
     assert_eq!(Pane::default(), Pane::Agents);
+    assert_eq!(Pane::ORDER, [Pane::Agents, Pane::Shell, Pane::Detail]);
 }

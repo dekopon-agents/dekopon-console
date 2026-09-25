@@ -227,6 +227,9 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         second,
         Default::default(),
     ));
+    assert_eq!(app.pane, dekopon_tui::Pane::Shell);
+    assert_eq!(app.mode, dekopon_tui::Mode::Composing);
+    assert!(app.composer.is_empty());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
         .draw(|frame| dekopon_tui::ui::draw(frame, &app))

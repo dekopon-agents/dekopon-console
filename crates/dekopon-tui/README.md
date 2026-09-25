@@ -8,16 +8,20 @@ The catalog provides safe instructions, already bounded mounted skills, and safe
 
 The console has no production history, chat asset input source, delivery sink, or model-facing improvement suggestion sink. References to absent `chat-asset:<N>` inputs are refused before submission; when a provider executes but returns assets the console cannot present, the outcome is an explicit local failure naming the already executed effect and warning not to repeat it. Descriptors are released by the core leg. No fake send/delivery is recorded. See the root README for credential isolation and source-backed broker integration fixture setup.
 
-Every drawn field passes through terminal-control sanitization. Provider/model payloads are redacted at render time; `r` deliberately reveals one field of one selected call and warns that it now lives in scrollback. The terminal guard restores raw mode and the alternate screen on exit/error/panic. The local shell pane uses Dekopon's bounded interpreter, not a container OS shell.
+Every drawn field passes through terminal-control sanitization. The manual shell transcript is sanitised at render time; model/session machinery remains in the library but model turns and the call-tree pane are not exposed by this console UI. The terminal guard restores raw mode and the alternate screen on exit/error/panic. Entering an agent opens the shell ready to type. Commands and bounded interpreter results appear above the editable trailing prompt in a single wrapped viewport. Nonzero exits and output truncation are marked. Each command is a separate script; variables do not carry over. This is Dekopon's bounded interpreter, not a container OS shell.
 
 | Key | Action |
 |---|---|
 | `tab` / `shift-tab` | next / previous pane |
-| `j` `k` / arrows | move agent or call cursor |
-| `enter` | enter selected agent (confirm requested scope when prompted) |
-| `i`, then `enter` | compose and submit a turn or shell line |
-| `esc` | stop at a cooperative boundary or leave composer |
-| `o` / `r` | expand call / reveal one redacted field |
-| `?` / `q` | help / quit |
+| `j` `k` / arrows | move agent selection |
+| `enter` | enter selected agent (confirm requested scope when prompted); in shell, run command |
+| `i` | resume typing in shell after leaving input |
+| `page up` / `page down` | page wrapped shell rows, including while typing |
+| `home` / `end` | jump to beginning / follow bottom of shell transcript |
+| `esc` | request cooperative stop when busy; otherwise leave input |
+
+| `?` / `q` | help / quit when not typing |
+
+On compact Mac keyboards, Fn-Up/Down and Fn-Left/Right usually deliver PageUp/PageDown and Home/End. Terminal emulators can intercept these keys; Command-key shortcuts are not guaranteed to reach the app. Tab/Shift-Tab leave input and switch among Agents, Shell, Capabilities.
 
 Licensed under either [Apache-2.0](../../LICENSE-APACHE) or [MIT](../../LICENSE-MIT).

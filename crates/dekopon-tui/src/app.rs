@@ -22,15 +22,13 @@ pub enum Pane {
     Agents,
     /// One agent's declared and effective capability surfaces.
     Detail,
-    /// The conversation and its tool-call tree.
-    Turns,
     /// A prompt bound to the agent's own capability seam.
     Shell,
 }
 
 impl Pane {
     /// Panes in cycling order.
-    pub const ORDER: [Self; 4] = [Self::Agents, Self::Detail, Self::Turns, Self::Shell];
+    pub const ORDER: [Self; 3] = [Self::Agents, Self::Shell, Self::Detail];
 
     /// Short title drawn in the tab bar.
     #[must_use]
@@ -38,7 +36,6 @@ impl Pane {
         match self {
             Self::Agents => "agents",
             Self::Detail => "capabilities",
-            Self::Turns => "turns",
             Self::Shell => "shell",
         }
     }
@@ -47,10 +44,9 @@ impl Pane {
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
-            Self::Agents => Self::Detail,
-            Self::Detail => Self::Turns,
-            Self::Turns => Self::Shell,
-            Self::Shell => Self::Agents,
+            Self::Agents => Self::Shell,
+            Self::Shell => Self::Detail,
+            Self::Detail => Self::Agents,
         }
     }
 
@@ -58,10 +54,9 @@ impl Pane {
     #[must_use]
     pub const fn previous(self) -> Self {
         match self {
-            Self::Agents => Self::Shell,
-            Self::Detail => Self::Agents,
-            Self::Turns => Self::Detail,
-            Self::Shell => Self::Turns,
+            Self::Agents => Self::Detail,
+            Self::Shell => Self::Agents,
+            Self::Detail => Self::Shell,
         }
     }
 }
@@ -88,7 +83,10 @@ pub struct ShellEntry {
     /// The interpreter's combined output.
     pub output: String,
     /// Its exit code.
-    pub exit_code: u8,
+    /// None while the interpreter is running.
+    pub exit_code: Option<u8>,
+    /// Whether the interpreter bounded its returned output.
+    pub truncated: bool,
 }
 
 /// A message shown on the status line until the next action replaces it.
@@ -179,6 +177,10 @@ pub struct App {
     pub transcript: Transcript,
     /// Lines run in the shell pane, oldest first.
     pub shell_history: Vec<ShellEntry>,
+    /// Fixed top visual row when paged away from the bottom; None follows the prompt.
+    pub shell_top: Option<usize>,
+    /// Current shell viewport inner width and height, updated before drawing or on resize.
+    pub shell_viewport: (u16, u16),
     /// The composer's contents.
     pub composer: String,
     /// Which pane has focus.
@@ -229,6 +231,8 @@ impl App {
             session: None,
             transcript: Transcript::default(),
             shell_history: Vec::new(),
+            shell_top: None,
+            shell_viewport: (0, 0),
             composer: String::new(),
             pane: Pane::default(),
             mode: Mode::default(),
@@ -269,18 +273,8 @@ impl App {
     /// Moves whichever cursor the focused pane owns, saturating rather than wrapping.
     ///
     /// Saturating on purpose: a list that jumps from the last row to the first is one an operator
-    /// scrolls past without noticing they have gone round. The turns pane moves the capability-call
-    /// cursor `o` and `r` act on; every other pane moves the agent highlight.
+    /// scrolls past without noticing they have gone round.
     pub fn move_selection(&mut self, delta: isize) {
-        if self.pane == Pane::Turns {
-            let count = self.calls().len();
-            if count == 0 {
-                return;
-            }
-            let next = self.selected_call as isize + delta;
-            self.selected_call = next.clamp(0, count as isize - 1) as usize;
-            return;
-        }
         if self.agents.is_empty() {
             return;
         }
@@ -388,10 +382,13 @@ impl App {
         self.session = Some(session);
         self.transcript = Transcript::default();
         self.shell_history.clear();
+        self.shell_top = None;
+        self.composer.clear();
+        self.mode = Mode::Composing;
         self.expanded_call = None;
         self.selected_call = 0;
         self.revealed.clear();
-        self.pane = Pane::Detail;
+        self.pane = Pane::Shell;
     }
 
     /// Submits the composer as a turn, or explains why it could not.
@@ -504,9 +501,42 @@ impl App {
         })
     }
 
-    /// Records a shell line and its result.
-    pub fn push_shell(&mut self, entry: ShellEntry) {
-        self.shell_history.push(entry);
+    /// Echoes an accepted command before opening its fresh broker leg.
+    pub fn start_shell(&mut self, input: String) {
+        self.shell_top = None;
+        self.busy = true;
+        self.notice = None;
+        self.shell_history.push(ShellEntry {
+            input,
+            output: String::new(),
+            exit_code: None,
+            truncated: false,
+        });
+    }
+
+    /// Completes the pending echo rather than appending a second command.
+    pub fn finish_shell(&mut self, entry: ShellEntry) {
+        if let Some(pending) = self
+            .shell_history
+            .last_mut()
+            .filter(|entry| entry.exit_code.is_none())
+        {
+            *pending = entry;
+        }
+    }
+
+    /// Reports a failed gate or task in the same transcript entry.
+    pub fn fail_shell(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if let Some(pending) = self
+            .shell_history
+            .last_mut()
+            .filter(|entry| entry.exit_code.is_none())
+        {
+            pending.output = message.clone();
+            pending.exit_code = Some(1);
+        }
+        self.notice = Some(Notice::refusal(message));
     }
 }
 

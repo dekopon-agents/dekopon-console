@@ -122,7 +122,7 @@ pub fn draw_scope_warning(frame: &mut Frame<'_>, app: &App) {
     let area = centered(frame.area(), 86, 12);
     frame.render_widget(Clear, area);
     let text = format!(
-        "REQUESTED scope: {}\n\nThe broker protocol does not echo authenticated chat scope. An attestor with empty chatScopes silently downgrades this claim to subject-only. Console-via Cedar must refuse missing trusted scope; verify exact grants before any model turn.\n\nLIVE PROVIDERS — effects are real. Enter to continue; any other key to cancel.",
+        "REQUESTED scope: {}\n\nThe broker protocol does not echo authenticated chat scope. Console-via Cedar must refuse absent or mismatched conversation context; verify exact grants before running a shell command.\n\nLIVE PROVIDERS — effects are real. Enter to continue; any other key to cancel.",
         app.scope_label
     );
     frame.render_widget(
@@ -144,18 +144,24 @@ pub fn draw_scope_warning(frame: &mut Frame<'_>, app: &App) {
 
 /// Draws the keybinding overlay.
 pub fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered(frame.area(), 62, 17);
+    let area = centered(frame.area(), 72, 18);
     frame.render_widget(Clear, area);
 
     let keys = [
         ("tab / shift-tab", "next / previous pane"),
-        ("j k  ↑ ↓", "move"),
-        ("enter", "hop into the highlighted agent"),
-        ("i", "compose a turn or a shell line"),
-        ("enter (composing)", "send"),
-        ("esc", "stop a running turn, or leave the composer"),
-        ("o", "expand the highlighted capability call"),
-        ("r", "reveal one redacted field"),
+        ("j k  ↑ ↓", "move agent selection"),
+        ("enter", "hop into agent; shell opens ready to type"),
+        ("i", "resume typing in shell"),
+        ("enter (typing)", "run one script"),
+        ("esc", "request stop if busy, else leave input"),
+        (
+            "page up / down",
+            "page wrapped shell rows (also while typing)",
+        ),
+        (
+            "home / end",
+            "shell start / follow bottom (Fn arrows on Mac)",
+        ),
         ("?", "this"),
         ("q", "quit"),
     ];
@@ -173,7 +179,11 @@ pub fn draw_help(frame: &mut Frame<'_>) {
         .collect();
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "  a stop is cooperative: calls already sent still complete",
+        "  terminals may intercept Fn/Command keys",
+        Style::default().fg(Theme::FORGOTTEN),
+    ));
+    lines.push(Line::styled(
+        "  stop is cooperative: calls already sent still complete",
         Style::default().fg(Theme::FORGOTTEN),
     ));
 
