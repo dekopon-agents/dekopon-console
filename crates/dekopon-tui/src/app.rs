@@ -10,6 +10,7 @@ use dekopon_protocol::Agent;
 use crate::{
     record::{CapabilityCall, SessionEvent},
     redact::redact,
+    report::ErrorReport,
     session::AgentSession,
     transcript::Transcript,
 };
@@ -73,6 +74,8 @@ pub enum Mode {
     ScopeWarning,
     /// The keybinding overlay is up.
     Help,
+    /// The last error's full report is up.
+    Error,
 }
 
 /// One line of console-visible history in the shell pane.
@@ -214,6 +217,10 @@ pub struct App {
     pub broker_trace: Option<String>,
     /// One-use acknowledgement of the requested-scope warning.
     pub scope_warning_confirmed: bool,
+    /// The most recent failure, in full; `e` reopens it.
+    pub last_error: Option<ErrorReport>,
+    /// First visual row of the error report pane.
+    pub error_scroll: u16,
 }
 
 impl App {
@@ -251,6 +258,61 @@ impl App {
             model_source: crate::session::ModelSource::Default,
             broker_trace: None,
             scope_warning_confirmed: false,
+            last_error: None,
+            error_scroll: 0,
+        }
+    }
+
+    /// A report of `operation` pre-filled with who attempted it and through what.
+    ///
+    /// The agent is the open session's, or else the highlighted one: a refused hop has no session.
+    #[must_use]
+    pub fn report(&self, report: ErrorReport) -> ErrorReport {
+        let agent = self.session.as_ref().map_or_else(
+            || {
+                self.highlighted_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default()
+            },
+            |session| session.agent.to_string(),
+        );
+        let mut report = report
+            .with("subject", self.subject.clone())
+            .with("agent", agent)
+            .with("profile", self.profile.as_deref().unwrap_or("subject-only"))
+            .with("scope", self.scope_label.clone())
+            .with("broker socket", self.socket_path.clone());
+        if let Some(trace) = &self.broker_trace {
+            report = report.with("broker trace", trace.clone());
+        }
+        report
+    }
+
+    /// Records a failure: logged in full, summarised on the status line, kept for `e`.
+    pub fn record_error(&mut self, report: ErrorReport) {
+        tracing::warn!(
+            target: "dekopon_tui::error",
+            operation = report.operation.as_str(),
+            report = %report,
+            "console error"
+        );
+        self.notice = Some(Notice::refusal(report.summary()));
+        self.last_error = Some(report);
+    }
+
+    /// Records a failure and opens its full report.
+    pub fn raise(&mut self, report: ErrorReport) {
+        self.record_error(report);
+        self.show_error();
+    }
+
+    /// Opens the last error's full report, if there is one.
+    pub fn show_error(&mut self) {
+        if self.last_error.is_some() {
+            self.mode = Mode::Error;
+            self.error_scroll = 0;
+        } else {
+            self.notice = Some(Notice::info("no error to show"));
         }
     }
 
@@ -525,18 +587,18 @@ impl App {
         }
     }
 
-    /// Reports a failed gate or task in the same transcript entry.
-    pub fn fail_shell(&mut self, message: impl Into<String>) {
-        let message = message.into();
+    /// Reports a failed gate or task in full in the same transcript entry.
+    pub fn fail_shell(&mut self, report: ErrorReport) {
+        let report = self.report(report);
         if let Some(pending) = self
             .shell_history
             .last_mut()
             .filter(|entry| entry.exit_code.is_none())
         {
-            pending.output = message.clone();
+            pending.output = report.to_string();
             pending.exit_code = Some(1);
         }
-        self.notice = Some(Notice::refusal(message));
+        self.record_error(report);
     }
 }
 

@@ -27,7 +27,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         Constraint::Length(6),
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .areas(frame.area());
 
@@ -44,5 +44,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         chrome::draw_help(frame);
     } else if app.mode == Mode::ScopeWarning {
         chrome::draw_scope_warning(frame, app);
+    } else if app.mode == Mode::Error {
+        chrome::draw_error(frame, app);
     }
 }

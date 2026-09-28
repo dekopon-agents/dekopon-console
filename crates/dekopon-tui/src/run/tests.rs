@@ -527,7 +527,10 @@ async fn switching_profiles_clears_the_model_replay_and_visible_history() {
     app.profile = Some("first".into());
     app.transcript.open("first profile secret".into());
     app.start_shell("first profile shell".into());
-    app.fail_shell("old result");
+    app.fail_shell(crate::ErrorReport::from_message(
+        "run shell command",
+        "old result",
+    ));
     app.busy = false;
     let directory = tempfile::tempdir().unwrap();
     let client = BrokerClient::new(
@@ -686,7 +689,10 @@ fn shell_paging_works_while_composing_and_tab_remains_reachable() {
     app.composer = "typed command".into();
     for index in 0..8 {
         app.start_shell(format!("command {index} long"));
-        app.fail_shell("output of several visual rows");
+        app.fail_shell(crate::ErrorReport::from_message(
+            "run shell command",
+            "output of several visual rows",
+        ));
     }
     on_key(&mut app, press(KeyCode::PageUp), &stop);
     assert!(app.shell_top.is_some());
@@ -715,4 +721,245 @@ fn busy_shell_refuses_second_submission_and_escape_requests_stop_while_typing() 
     on_key(&mut app, press(KeyCode::Esc), &stop);
     assert!(stop.is_requested());
     assert_eq!(app.mode, Mode::Composing);
+}
+
+/// A socket that answers each connection with the next canned frame, as brokerd would.
+fn fake_broker(responses: Vec<Value>) -> (tempfile::TempDir, BrokerClient) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.path().join("b.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    tokio::spawn(async move {
+        for response in responses {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = dekopon_broker_protocol::DescriptorStream::new(stream);
+            let (_request, _descriptors) = stream
+                .read_frame::<Value>(FrameLimits::default())
+                .await
+                .unwrap();
+            stream
+                .write_frame(&response, &[], FrameLimits::default())
+                .await
+                .unwrap();
+        }
+    });
+    let client = BrokerClient::new(
+        &path,
+        rustix::process::geteuid().as_raw(),
+        FrameLimits::default(),
+    )
+    .unwrap();
+    (directory, client)
+}
+
+fn refusal_frame() -> Value {
+    serde_json::to_value(dekopon_broker_protocol::ResponseEnvelope::error(
+        "unauthenticated",
+        "attestation refused: no attestor authority for this subject",
+    ))
+    .unwrap()
+}
+
+fn empty_surface_frame() -> Value {
+    serde_json::to_value(dekopon_broker_protocol::ResponseEnvelope::capabilities(
+        Vec::new(),
+        Vec::new(),
+        std::collections::BTreeMap::new(),
+    ))
+    .unwrap()
+}
+
+async fn hop(app: &mut App, client: &BrokerClient) {
+    let mut options = ConsoleOptions::new(app.subject.parse().unwrap(), "test-model".into());
+    let mut history = History::new(options.history_limits);
+    dispatch(
+        app,
+        Action::Enter,
+        client,
+        &mut options,
+        &mut None,
+        &mut history,
+        &StopFlag::default(),
+    )
+    .await;
+}
+
+/// Every row of one drawn frame, so a test reads what the operator would.
+fn drawn(app: &App) -> String {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+    terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    buffer
+        .content()
+        .chunks(usize::from(buffer.area.width))
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_contains_all(text: &str, expected: &[&str]) {
+    for fragment in expected {
+        assert!(text.contains(fragment), "missing {fragment:?} in:\n{text}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_hop_opens_the_broker_refusal_in_full() {
+    let (_directory, client) = fake_broker(vec![refusal_frame()]);
+    let mut app = console();
+    hop(&mut app, &client).await;
+
+    assert!(app.session.is_none());
+    assert_eq!(app.mode, Mode::Error, "a refused hop opens its report");
+    let report = app.last_error.as_ref().unwrap().to_string();
+    assert_contains_all(
+        &report,
+        &[
+            "open broker session failed",
+            "subject: slack.t0123abc.u9xyz",
+            "agent: ville-github",
+            "scope: subject-only",
+            "error: could not open a broker session for this subject and agent: broker returned \
+             unauthenticated: attestation refused: no attestor authority for this subject",
+            "broker refusal code: unauthenticated",
+            "broker refusal message: attestation refused: no attestor authority for this subject",
+            "event=broker_capabilities_refused, subject=slack.t0123abc.u9xyz, agent=ville-github",
+        ],
+    );
+    assert_contains_all(
+        &drawn(&app),
+        &[
+            "broker refusal code: unauthenticated",
+            "broker refusal message: attestation refused: no attestor authority for this subject",
+            "event=broker_capabilities_refused,",
+        ],
+    );
+
+    let stop = StopFlag::default();
+    on_key(&mut app, press(KeyCode::Esc), &stop);
+    assert_eq!(app.mode, Mode::Browsing);
+    let status = drawn(&app);
+    assert!(
+        status.contains("attestation refused: no attestor authority for this subject"),
+        "the status line keeps the refusal message: {status}"
+    );
+    on_key(&mut app, press(KeyCode::Char('e')), &stop);
+    assert_eq!(app.mode, Mode::Error, "e reopens the last error");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undecodable_broker_answer_names_the_decode_error() {
+    let mut frame = refusal_frame();
+    frame["response"] = json!({"type": "bogus"});
+    let (_directory, client) = fake_broker(vec![frame]);
+    let mut app = console();
+    hop(&mut app, &client).await;
+
+    let report = app.last_error.as_ref().unwrap();
+    assert_eq!(report.refusal, None, "a decode failure is not a refusal");
+    assert_contains_all(
+        &report.to_string(),
+        &[
+            "error: could not open a broker session for this subject and agent: broker response \
+             framing failed: broker frame is not valid protocol JSON: unknown variant `bogus`",
+            "agent: ville-github",
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_absent_broker_names_the_transport_cause() {
+    let directory = tempfile::tempdir().unwrap();
+    let client = BrokerClient::new(
+        directory.path().join("absent.sock"),
+        rustix::process::geteuid().as_raw(),
+        FrameLimits::default(),
+    )
+    .unwrap();
+    let mut app = console();
+    hop(&mut app, &client).await;
+
+    let report = app.last_error.as_ref().unwrap().to_string();
+    assert_contains_all(
+        &report,
+        &[
+            "error: could not open a broker session for this subject and agent: could not \
+             inspect broker socket: ",
+            "(os error 2)",
+            "broker socket: /run/dekopon/broker.sock",
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_surface_says_what_the_broker_accepted() {
+    let (_directory, client) = fake_broker(vec![empty_surface_frame()]);
+    let mut app = console();
+    hop(&mut app, &client).await;
+
+    assert!(app.session.is_none());
+    assert_eq!(app.mode, Mode::Error);
+    assert_contains_all(
+        &app.last_error.as_ref().unwrap().to_string(),
+        &[
+            "error: broker grants no capabilities for this context",
+            "permitted agent.prompt",
+            "context.agent == \"ville-github\"",
+            "subject: slack.t0123abc.u9xyz",
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_shell_command_is_written_in_full_into_the_transcript() {
+    let (_directory, client) = fake_broker(vec![empty_surface_frame(), refusal_frame()]);
+    let mut app = console();
+    let leg = crate::session::open_agent(
+        client.clone(),
+        app.subject.parse().unwrap(),
+        "ville-github".parse().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    app.enter(crate::session::AgentSession::new(
+        "ville-github".parse().unwrap(),
+        leg,
+        dekopon_agent::prompt::HistoryLimits::default(),
+    ));
+    let mut options = ConsoleOptions::new(app.subject.parse().unwrap(), "test-model".into());
+    let mut history = History::new(options.history_limits);
+    dispatch(
+        &mut app,
+        Action::Shell("gh issue list".into()),
+        &client,
+        &mut options,
+        &mut None,
+        &mut history,
+        &StopFlag::default(),
+    )
+    .await;
+
+    let entry = app.shell_history.last().unwrap();
+    assert_eq!(entry.exit_code, Some(1));
+    assert_contains_all(
+        &entry.output,
+        &[
+            "open broker session for a shell command failed",
+            "broker returned unauthenticated: attestation refused",
+            "broker refusal code: unauthenticated",
+            "agent: ville-github",
+        ],
+    );
+    assert!(!app.busy);
+    assert_contains_all(
+        &drawn(&app),
+        &["broker refusal code: unauthenticated", "[exit code: 1]"],
+    );
 }
