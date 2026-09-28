@@ -24,18 +24,18 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 # Exact crates.io versions of one Dekopon release, never path or git dependencies.
 #
-# Exact =0.22.0 pins: these pre-1.0 crates and the broker wire must be tested as a set.
+# Exact =0.26.0 pins: these pre-1.0 crates and the broker wire must be tested as a set.
 # Not a git dependency either — `dekopon-provider-gh` pinned a branch once, and a `branch =`
 # dependency resolves by fetching the ref, so a deleted branch broke every cold-cache build.
-dekopon-agent = "=0.22.0"
-dekopon-broker-protocol = "=0.22.0"
-dekopon-config = "=0.22.0"
-dekopon-core = { version = "=0.22.0", default-features = false }
-dekopon-model = "=0.22.0"
-dekopon-protocol = { version = "=0.22.0", default-features = false }
-dekopon-process = "=0.22.0"
-dekopon-shell = "=0.22.0"
-dekopon-telemetry = "=0.22.0"
+dekopon-agent = "=0.26.0"
+dekopon-broker-protocol = "=0.26.0"
+dekopon-config = "=0.26.0"
+dekopon-core = { version = "=0.26.0", default-features = false }
+dekopon-model = "=0.26.0"
+dekopon-protocol = { version = "=0.26.0", default-features = false }
+dekopon-process = "=0.26.0"
+dekopon-shell = "=0.26.0"
+dekopon-telemetry = { version = "=0.26.0", features = ["exporter"] }
 opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "logs"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 prost = "0.14.3"

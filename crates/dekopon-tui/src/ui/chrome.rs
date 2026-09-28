@@ -78,10 +78,11 @@ pub fn draw_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Draws the status line: the notice, then the facts that must never be a guess.
+/// Draws the status lines: the notice across the full width, then the facts that must never be a
+/// guess. A notice that still does not fit is an error summary; `e` opens its full report.
 pub fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let [left, right] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(56)]).areas(area);
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
     let notice = app.notice.as_ref().map_or_else(
         || Span::styled("? for keys", Style::default().fg(Theme::FORGOTTEN)),
@@ -144,7 +145,7 @@ pub fn draw_scope_warning(frame: &mut Frame<'_>, app: &App) {
 
 /// Draws the keybinding overlay.
 pub fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered(frame.area(), 72, 18);
+    let area = centered(frame.area(), 72, 20);
     frame.render_widget(Clear, area);
 
     let keys = [
@@ -162,6 +163,7 @@ pub fn draw_help(frame: &mut Frame<'_>) {
             "home / end",
             "shell start / follow bottom (Fn arrows on Mac)",
         ),
+        ("e", "show the last error in full"),
         ("?", "this"),
         ("q", "quit"),
     ];
@@ -186,9 +188,61 @@ pub fn draw_help(frame: &mut Frame<'_>) {
         "  stop is cooperative: calls already sent still complete",
         Style::default().fg(Theme::FORGOTTEN),
     ));
+    lines.push(Line::styled(
+        "  errors open in full; the last one is printed again on quit",
+        Style::default().fg(Theme::FORGOTTEN),
+    ));
 
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" keys ")),
+        area,
+    );
+}
+
+/// The full report as sanitised lines, wrapped and never cut short.
+fn error_paragraph(app: &App) -> Paragraph<'static> {
+    let text = app
+        .last_error
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    Paragraph::new(
+        text.split('\n')
+            .map(|line| Line::raw(crate::redact::sanitize_line(line)))
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false })
+}
+
+/// How far the error pane can scroll at the current terminal size.
+#[must_use]
+pub fn error_max_scroll(app: &App) -> u16 {
+    let (width, height) = app.shell_viewport;
+    // The pane spans the whole frame less its top and bottom rules.
+    let rows = error_paragraph(app).line_count(width.saturating_add(2).max(1));
+    let visible = usize::from(height.saturating_add(9));
+    u16::try_from(rows.saturating_sub(visible)).unwrap_or(u16::MAX)
+}
+
+/// The last error, full-screen. No side borders, so a terminal selection copies clean text.
+pub fn draw_error(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(Theme::DENIED))
+        .title(" error · select to copy · also on stderr and printed again on quit ")
+        .title_bottom(" j/k ↑↓ PgUp/PgDn scroll · Esc/Enter/q close · e reopens ");
+    let inner = block.inner(area);
+    let paragraph = error_paragraph(app);
+    let end = paragraph
+        .line_count(inner.width.max(1))
+        .saturating_sub(usize::from(inner.height));
+    let top = usize::from(app.error_scroll).min(end);
+    frame.render_widget(
+        paragraph
+            .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0))
+            .block(block),
         area,
     );
 }

@@ -29,6 +29,7 @@ use tracing::Instrument as _;
 use crate::{
     app::{App, Mode, Notice, Pane, ShellEntry},
     record::{RecordingProgress, SessionEvent},
+    report::ErrorReport,
     session::{
         AgentSession, ConsoleOptions, LegHandle, SessionError, StopFlag, build_model, open_agent,
         session_channel,
@@ -116,7 +117,7 @@ pub async fn run(
     client: BrokerClient,
     mut options: ConsoleOptions,
 ) -> Result<(), ConsoleExit> {
-    let (_guard, mut terminal) = TerminalGuard::enter().map_err(ConsoleExit::Terminal)?;
+    let (guard, mut terminal) = TerminalGuard::enter().map_err(ConsoleExit::Terminal)?;
 
     let stop = StopFlag::default();
     let mut keys = EventStream::new();
@@ -135,7 +136,7 @@ pub async fn run(
         .await;
     }
 
-    drive_event_loop(
+    let result = drive_event_loop(
         &mut terminal,
         &mut app,
         &client,
@@ -145,7 +146,14 @@ pub async fn run(
         &mut history,
         &stop,
     )
-    .await
+    .await;
+    drop(terminal);
+    drop(guard);
+    // Back on the ordinary screen, the last failure lands in scrollback where it can be copied.
+    if let Some(report) = &app.last_error {
+        eprintln!("last console error:\n{report}");
+    }
+    result
 }
 
 #[expect(
@@ -164,7 +172,7 @@ async fn drive_event_loop(
 ) -> Result<(), ConsoleExit> {
     loop {
         if let Ok(size) = terminal.size() {
-            app.shell_viewport = (size.width.saturating_sub(2), size.height.saturating_sub(10));
+            app.shell_viewport = (size.width.saturating_sub(2), size.height.saturating_sub(11));
         }
         if let Err(error) = terminal.draw(|frame| ui::draw(frame, app)) {
             stop_running(running, stop).await;
@@ -186,7 +194,7 @@ async fn drive_event_loop(
                     }
                 }
                 Some(Ok(Event::Resize(width, height))) => {
-                    app.shell_viewport = (width.saturating_sub(2), height.saturating_sub(10));
+                    app.shell_viewport = (width.saturating_sub(2), height.saturating_sub(11));
                 }
                 Some(Ok(_)) => {}
                 Some(Err(error)) => { stop_running(running, stop).await; return Err(ConsoleExit::Terminal(error)); },
@@ -240,10 +248,24 @@ async fn finish_turn(
         Ok(Ok(returned)) => *history = returned,
         // The session's own history is lost, so the model's replay window is now a guess. Saying so
         // is better than silently continuing against a window that no longer matches the screen.
-        Ok(Err(error)) if shell => app.fail_shell(error.to_string()),
-        Err(error) if shell => app.fail_shell(format!("the shell task died: {error}")),
-        Ok(Err(error)) => app.notice = Some(Notice::refusal(error.to_string())),
-        Err(error) => app.notice = Some(Notice::refusal(format!("the session task died: {error}"))),
+        Ok(Err(error)) if shell => {
+            app.fail_shell(ErrorReport::from_error("run shell command", &error));
+        }
+        Err(error) if shell => app.fail_shell(ErrorReport::from_error(
+            "run shell command (the shell task died)",
+            &error,
+        )),
+        Ok(Err(error)) => {
+            let report = app.report(ErrorReport::from_error("run model turn", &error));
+            app.raise(report);
+        }
+        Err(error) => {
+            let report = app.report(ErrorReport::from_error(
+                "run model turn (the session task died)",
+                &error,
+            ));
+            app.raise(report);
+        }
     }
     stop.reset();
     if shell {
@@ -252,7 +274,10 @@ async fn finish_turn(
             .last()
             .is_some_and(|entry| entry.exit_code.is_none())
         {
-            app.fail_shell("shell ended without reporting an outcome");
+            app.fail_shell(ErrorReport::from_message(
+                "run shell command",
+                "shell ended without reporting an outcome",
+            ));
         }
         app.busy = false;
     } else {
@@ -292,6 +317,23 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
         app.mode = Mode::Browsing;
         return None;
     }
+    if app.mode == Mode::Error {
+        let page = app.shell_viewport.1.max(1);
+        let scroll = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.error_scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => app.error_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.error_scroll.saturating_add(page),
+            KeyCode::PageUp => app.error_scroll.saturating_sub(page),
+            KeyCode::Home => 0,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | 'e') => {
+                app.mode = Mode::Browsing;
+                return None;
+            }
+            _ => return None,
+        };
+        app.error_scroll = scroll.min(crate::ui::chrome::error_max_scroll(app));
+        return None;
+    }
     if app.pane == Pane::Shell {
         match key.code {
             KeyCode::PageUp => {
@@ -320,6 +362,7 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('e') => app.show_error(),
         KeyCode::Tab => app.pane = app.pane.next(),
         KeyCode::BackTab => app.pane = app.pane.previous(),
         KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
@@ -519,14 +562,16 @@ async fn dispatch_in_context(
             .await
             {
                 Ok(leg) if leg.effective_capabilities().is_empty() => {
-                    app.notice = Some(Notice::refusal(
-                        "broker grants no capabilities for this context; no model call will be sent",
-                    ));
+                    let report = empty_surface(app, "open broker session");
+                    app.raise(report);
                 }
                 Ok(leg) => {
                     app.enter(AgentSession::new(agent, leg, options.history_limits));
                 }
-                Err(error) => app.notice = Some(Notice::refusal(error.to_string())),
+                Err(error) => {
+                    let report = session_refusal(app, "open broker session", &error);
+                    app.raise(report);
+                }
             }
         }
         Action::Turn(prompt) => {
@@ -543,14 +588,14 @@ async fn dispatch_in_context(
             {
                 Ok(leg) if !leg.effective_capabilities().is_empty() => leg,
                 Ok(_) => {
-                    refuse_turn(
-                        app,
-                        "broker grants no capabilities; no model call will be sent".into(),
-                    );
+                    let report = empty_surface(app, "open broker session for a model turn");
+                    refuse_turn(app, report);
                     return;
                 }
                 Err(error) => {
-                    refuse_turn(app, error.to_string());
+                    let report =
+                        session_refusal(app, "open broker session for a model turn", &error);
+                    refuse_turn(app, report);
                     return;
                 }
             };
@@ -558,7 +603,8 @@ async fn dispatch_in_context(
             let model: Arc<dyn ChatModel + Send + Sync> = match build_model(options, stop) {
                 Ok(model) => Arc::from(model),
                 Err(error) => {
-                    refuse_turn(app, error.to_string());
+                    let report = app.report(ErrorReport::from_error("build model client", &error));
+                    refuse_turn(app, report);
                     return;
                 }
             };
@@ -618,12 +664,15 @@ async fn dispatch_in_context(
             {
                 Ok(leg) if !leg.effective_capabilities().is_empty() => leg,
                 Ok(_) => {
-                    app.fail_shell("broker grants no capabilities; no command will be sent");
+                    let report = empty_surface(app, "open broker session for a shell command");
+                    app.fail_shell(report);
                     app.busy = false;
                     return;
                 }
                 Err(error) => {
-                    app.fail_shell(error.to_string());
+                    let report =
+                        session_refusal(app, "open broker session for a shell command", &error);
+                    app.fail_shell(report);
                     app.busy = false;
                     return;
                 }
@@ -671,9 +720,47 @@ async fn dispatch_in_context(
 }
 
 /// Closes the transcript when a fresh gate or model setup refuses before inference.
-fn refuse_turn(app: &mut App, message: String) {
-    app.on_session_event(SessionEvent::Finished(Box::new(Err(message.clone()))));
-    app.notice = Some(Notice::refusal(message));
+fn refuse_turn(app: &mut App, report: ErrorReport) {
+    app.on_session_event(SessionEvent::Finished(Box::new(Err(report.to_string()))));
+    app.raise(report);
+}
+
+/// A failed `capabilitiesFor`, with the broker's refusal and where its reason is logged.
+fn session_refusal(app: &App, operation: &str, error: &SessionError) -> ErrorReport {
+    let report = app.report(ErrorReport::from_error(operation, error));
+    if !report
+        .refusal
+        .as_ref()
+        .is_some_and(|(code, _)| code == dekopon_broker_protocol::ERROR_UNAUTHENTICATED)
+    {
+        return report;
+    }
+    let note = format!(
+        "brokerd keeps the refusal reason off the wire so a refused caller cannot probe the subject \
+         directory or agent grants. It logs it: a WARN with event=broker_capabilities_refused, \
+         subject={}, agent={}, a reason (attestation-denied, unmapped-subject, agent-denied or \
+         policy-error) and the determining policy_ids",
+        report.fact("subject").unwrap_or_default(),
+        report.fact("agent").unwrap_or_default(),
+    );
+    report.with_note(note)
+}
+
+/// The broker answered, and policy grants this context nothing.
+fn empty_surface(app: &App, operation: &str) -> ErrorReport {
+    let report = app.report(ErrorReport::from_message(
+        operation,
+        "broker grants no capabilities for this context; no model call or command will be sent",
+    ));
+    let note = format!(
+        "the broker accepted the attestation and permitted agent.prompt, but Cedar authorizes no \
+         provider capability for this subject's principal with context.agent == \"{}\" in scope \
+         {}. Check the permit policies for that agent, including any context.transport or \
+         context.conversation condition",
+        report.fact("agent").unwrap_or_default(),
+        report.fact("scope").unwrap_or_default(),
+    );
+    report.with_note(note)
 }
 
 /// The agent's standing orders, handed to the model fresh on every turn.

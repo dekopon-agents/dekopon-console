@@ -264,7 +264,10 @@ fn shell_entries_accumulate_in_order() {
         truncated: false,
     });
     app.start_shell("nope".to_owned());
-    app.fail_shell("command not found");
+    app.fail_shell(crate::ErrorReport::from_message(
+        "run shell command",
+        "command not found",
+    ));
 
     assert_eq!(app.shell_history.len(), 2);
     assert_eq!(app.shell_history[1].exit_code, Some(1));

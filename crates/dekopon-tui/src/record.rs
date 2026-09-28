@@ -14,6 +14,7 @@
 //! deny a call would be a second authorization path, and there is only ever one of those.
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -221,8 +222,16 @@ impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
         self.inner.command_words()
     }
 
+    fn command_word_help(&self) -> BTreeMap<String, String> {
+        self.inner.command_word_help()
+    }
+
     fn has_command_word(&self, word: &str) -> bool {
         self.inner.has_command_word(word)
+    }
+
+    fn note(&self, text: &str, eta: Option<Duration>) {
+        self.inner.note(text, eta);
     }
 
     fn describe(&self, capability: &str) -> Option<CapabilityDescription> {
@@ -310,6 +319,10 @@ impl<R: ScriptRuntime> ScriptRuntime for RecordingRuntime<R> {
     fn command_words(&self) -> Vec<String> {
         self.inner.command_words()
     }
+
+    fn command_word_help(&self) -> BTreeMap<String, String> {
+        self.inner.command_word_help()
+    }
 }
 
 /// Reports model/tool milestones without a second stream of model-authored text or arguments.
@@ -337,6 +350,7 @@ impl ProgressSink for RecordingProgress {
             ProgressEvent::ToolFinished { word, outcome, .. } => {
                 format!("{}: {outcome:?}", word.as_str())
             }
+            ProgressEvent::Note { text, .. } => text.as_str().to_owned(),
             ProgressEvent::Cancelled { .. } => "stopped; sent effects are not rolled back".into(),
             ProgressEvent::Failed { class } => format!("turn failed: {class:?}"),
             ProgressEvent::Finished {
@@ -346,6 +360,7 @@ impl ProgressSink for RecordingProgress {
                 ..
             } => format!("{outcome:?} · {turns} model turns · {tool_calls} tools"),
             ProgressEvent::Started { .. }
+            | ProgressEvent::Steered { .. }
             | ProgressEvent::Answered { .. }
             | ProgressEvent::TextDelta { .. }
             | ProgressEvent::Attachment { .. }

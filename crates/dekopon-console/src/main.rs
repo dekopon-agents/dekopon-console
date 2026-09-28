@@ -11,7 +11,6 @@
 
 use std::{
     collections::HashSet,
-    error::Error as _,
     io::{self, IsTerminal as _},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -168,14 +167,7 @@ fn main() -> ExitCode {
     match if cli.idle { idle() } else { run_console(&cli) } {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
-            if cli.verbose > 0 {
-                let mut source = error.source();
-                while let Some(cause) = source {
-                    eprintln!("  caused by: {cause}");
-                    source = cause.source();
-                }
-            }
+            eprintln!("error: {}", dekopon_tui::report::chain(&error));
             ExitCode::FAILURE
         }
     }

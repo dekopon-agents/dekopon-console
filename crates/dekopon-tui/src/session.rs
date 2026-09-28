@@ -6,7 +6,7 @@
 //! fresh on every hop.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -82,8 +82,8 @@ pub enum SessionError {
         #[source]
         source: ClientError,
     },
-    /// The broker refused or could not answer the capability snapshot.
-    #[error("the broker would not open a session for this subject and agent")]
+    /// The broker refused or could not answer the capability snapshot. The source says which.
+    #[error("could not open a broker session for this subject and agent")]
     Leg(#[from] BrokerLegError),
     /// Resolution landed on the credential file another surface owns.
     #[error(
@@ -483,6 +483,8 @@ pub struct AgentSession {
     pub effective: Vec<EffectiveCapabilityView>,
     /// Command words the session's `bash` tool will accept.
     pub command_words: Vec<String>,
+    /// The broker's help page for each command word, as the model sees it.
+    pub command_word_help: BTreeMap<String, String>,
     /// The replay window handed to the model, which is not the console's own transcript.
     pub history: History,
     leg: Arc<BrokerLeg>,
@@ -493,14 +495,14 @@ impl AgentSession {
     #[must_use]
     pub fn new(agent: AgentId, leg: BrokerLeg, history_limits: HistoryLimits) -> Self {
         let effective = leg.effective_capabilities();
-        let command_words = {
-            let invoker: &dyn CapabilityInvoker = &leg;
-            invoker.command_words()
-        };
+        let invoker: &dyn CapabilityInvoker = &leg;
+        let command_words = invoker.command_words();
+        let command_word_help = invoker.command_word_help();
         Self {
             agent,
             effective,
             command_words,
+            command_word_help,
             history: History::new(history_limits),
             leg: Arc::new(leg),
         }
@@ -614,7 +616,7 @@ pub async fn run_turn(
             .with_progress(progress);
 
         let outcome = run_prompt_session(model.as_ref(), &runtime, inputs, &mut history)
-            .map_err(|error| error.to_string());
+            .map_err(|error| crate::report::chain(&error));
         if events
             .send(SessionEvent::Finished(Box::new(outcome)))
             .is_err()
@@ -653,8 +655,16 @@ impl CapabilityInvoker for LegHandle {
         self.0.command_words()
     }
 
+    fn command_word_help(&self) -> BTreeMap<String, String> {
+        self.0.command_word_help()
+    }
+
     fn has_command_word(&self, word: &str) -> bool {
         self.0.has_command_word(word)
+    }
+
+    fn note(&self, text: &str, eta: Option<Duration>) {
+        self.0.note(text, eta);
     }
 
     fn describe(&self, capability: &str) -> Option<CapabilityDescription> {

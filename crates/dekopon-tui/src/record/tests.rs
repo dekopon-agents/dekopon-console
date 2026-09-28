@@ -23,6 +23,10 @@ impl CapabilityInvoker for FixedInvoker {
         vec!["gh.issue.list".to_owned()]
     }
 
+    fn command_word_help(&self) -> std::collections::BTreeMap<String, String> {
+        [("gh".to_owned(), "gh issue list".to_owned())].into()
+    }
+
     fn describe(&self, capability: &str) -> Option<CapabilityDescription> {
         (capability == "gh.issue.list").then(|| CapabilityDescription {
             capability: capability.to_owned(),
@@ -157,6 +161,7 @@ fn forwards_every_query_without_reporting_it() {
     assert!(invoker.is_granted("gh.issue.list"));
     assert!(invoker.describe("gh.issue.list").is_some());
     assert!(invoker.describe("gh.nope").is_none());
+    assert_eq!(invoker.command_word_help()["gh"], "gh issue list");
 
     assert!(
         drain(&mut receiver).is_empty(),

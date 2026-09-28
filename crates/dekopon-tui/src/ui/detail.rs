@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
 
 use super::Theme;
@@ -26,8 +26,12 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let [table_area, words_area] =
-        Layout::vertical([Constraint::Min(4), Constraint::Length(4)]).areas(area);
+    let [table_area, help_area, words_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Fill(1),
+        Constraint::Length(4),
+    ])
+    .areas(area);
 
     let mut granted: Vec<&dekopon_agent::meta::EffectiveCapabilityView> =
         session.effective.iter().collect();
@@ -68,6 +72,30 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         )
         .block(Block::default().borders(Borders::ALL).title(title)),
         table_area,
+    );
+
+    // Provider-authored help pages, exactly as the model's script tool receives them.
+    let mut help = Vec::new();
+    for (word, page) in &session.command_word_help {
+        help.push(Line::styled(
+            sanitize_line(word),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        help.extend(page.lines().map(|line| Line::raw(sanitize_line(line))));
+    }
+    if help.is_empty() {
+        help.push(Line::styled(
+            "the broker sent no help pages",
+            Style::default().fg(Theme::FORGOTTEN),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(help).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" command help "),
+        ),
+        help_area,
     );
 
     let words = if session.command_words.is_empty() {
