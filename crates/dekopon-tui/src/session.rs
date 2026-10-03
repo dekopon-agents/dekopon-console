@@ -27,7 +27,7 @@ use dekopon_broker_protocol::{
     ResolvedBrokerSocket,
 };
 use dekopon_config::Skill;
-use dekopon_core::{AgentId, ExternalSubject, SecretUseProposal};
+use dekopon_core::{AgentId, ExternalSubject};
 use dekopon_model::{
     blocking::BlockingModel,
     chatgpt::{self, ChatGptError},
@@ -40,10 +40,9 @@ use dekopon_model::{
 use dekopon_process::CancelHandle;
 use dekopon_protocol::Agent;
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandRun,
-    Limits as ShellLimits,
+    CallBudget, CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandProposal,
+    CommandRun, JobControl, Limits as ShellLimits, Streams,
 };
-use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc::unbounded_channel, watch};
 
@@ -360,13 +359,8 @@ impl CapabilityInvoker for NoDirect {
         None
     }
 
-    fn invoke(
-        &self,
-        _capability: &str,
-        _input: Value,
-        secret_use: Option<SecretUseProposal>,
-    ) -> CapabilityCallResult {
-        if secret_use.is_some() {
+    fn invoke(&self, proposal: CommandProposal, _streams: Streams) -> CapabilityCallResult {
+        if proposal.secret_use.is_some() {
             return dekopon_shell::secret_use_unsupported();
         }
         CapabilityCallResult::NotFound
@@ -539,7 +533,7 @@ impl AgentSession {
     reason = "a turn carries its broker leg, model, authored agent, limits, history, cancellation, progress and output channel together"
 )]
 pub async fn run_turn(
-    leg: Arc<BrokerLeg>,
+    leg: BrokerLeg,
     model: Arc<dyn ChatModel + Send + Sync>,
     prompt: String,
     system: Option<String>,
@@ -555,6 +549,8 @@ pub async fn run_turn(
     tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
         let sequence = Sequence::default();
+        let calls = CallBudget::new(options.prompt_limits.max_capability_calls);
+        let leg = Arc::new(leg.with_progress(progress.clone(), calls.clone()));
         let runtime = RecordingRuntime::new(
             ShellRuntime {
                 invoker: RecordingInvoker::new(
@@ -566,6 +562,7 @@ pub async fn run_turn(
                     sequence.clone(),
                 ),
                 limits: options.shell_limits,
+                calls,
             },
             events.clone(),
             sequence,
@@ -643,6 +640,18 @@ pub async fn run_turn(
 pub struct LegHandle(pub Arc<BrokerLeg>);
 
 impl CapabilityInvoker for LegHandle {
+    fn cancelled(&self) -> bool {
+        self.0.cancelled()
+    }
+
+    fn script_started(&self, timeout: Duration) {
+        self.0.script_started(timeout);
+    }
+
+    fn job_control(&self) -> Option<&dyn JobControl> {
+        self.0.job_control()
+    }
+
     fn granted(&self) -> Vec<String> {
         self.0.granted()
     }
@@ -671,7 +680,7 @@ impl CapabilityInvoker for LegHandle {
         self.0.describe(capability)
     }
 
-    fn run_command(&self, word: &str, argv: &[String], stdin: Option<&str>) -> Option<CommandRun> {
+    fn run_command(&self, word: &str, argv: &[String], stdin: bool) -> Option<CommandRun> {
         self.0.run_command(word, argv, stdin)
     }
 
@@ -679,13 +688,8 @@ impl CapabilityInvoker for LegHandle {
         self.0.script_finished();
     }
 
-    fn invoke(
-        &self,
-        capability: &str,
-        input: Value,
-        secret_use: Option<SecretUseProposal>,
-    ) -> CapabilityCallResult {
-        refuse_unpresented_assets(self.0.invoke(capability, input, secret_use))
+    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+        refuse_unpresented_assets(self.0.invoke(proposal, streams))
     }
 }
 
@@ -694,8 +698,8 @@ impl CapabilityInvoker for LegHandle {
 /// names that fact and warns against repeating the effect, rather than claiming no effect occurred.
 fn refuse_unpresented_assets(result: CapabilityCallResult) -> CapabilityCallResult {
     match &result {
-        CapabilityCallResult::Succeeded(output) if output.get("assetNote").and_then(Value::as_str)
-            .is_some_and(|note| note.contains("this embedder has no asset store")) =>
+        CapabilityCallResult::SucceededWithStderr(stderr)
+            if stderr.contains("this embedder has no asset store") =>
             CapabilityCallResult::Failed {
                 error: "provider effect executed, but console cannot retain or deliver returned assets; do not repeat the call".into(),
                 detail: None,

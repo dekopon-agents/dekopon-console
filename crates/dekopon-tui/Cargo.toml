@@ -22,6 +22,7 @@ dekopon-agent.workspace = true
 dekopon-broker-protocol.workspace = true
 dekopon-core.workspace = true
 dekopon-model.workspace = true
+dekopon-model-token-governor.workspace = true
 dekopon-protocol.workspace = true
 dekopon-process.workspace = true
 dekopon-shell.workspace = true

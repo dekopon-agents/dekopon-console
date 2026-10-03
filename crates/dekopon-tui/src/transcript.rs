@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use dekopon_model::model::ModelUsage;
+use dekopon_model_token_governor::ModelUsage;
 
 use crate::record::{CapabilityCall, ScriptRun, SessionEvent};
 

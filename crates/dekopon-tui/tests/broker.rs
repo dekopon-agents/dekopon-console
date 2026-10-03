@@ -6,7 +6,9 @@
 use dekopon_broker_protocol::{BrokerClient, ChatScopeClaim, FrameLimits};
 use dekopon_core::{AgentId, ExternalSubject};
 use dekopon_core::{SecretDrn, SecretUseProposal};
-use dekopon_shell::{CapabilityCallResult, CapabilityInvoker as _, Interpreter, Limits};
+use dekopon_shell::{
+    CapabilityCallResult, CapabilityInvoker as _, CommandProposal, Interpreter, Limits, Streams,
+};
 use dekopon_tui::{
     App,
     record::{RecordingInvoker, Sequence, SessionEvent},
@@ -23,6 +25,13 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+
+fn sink() -> Streams {
+    Streams {
+        stdin: None,
+        stdout: tempfile::tempfile().unwrap().into(),
+    }
+}
 
 struct BrokerFixture {
     child: Child,
@@ -287,7 +296,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
                 .parse::<SecretDrn>()
                 .unwrap(),
         };
-        let denied = recorded.invoke("cli-probe.upper", json!({"text":"hi"}), Some(drn));
+        let denied = recorded.invoke(CommandProposal::new("cli-probe.upper", json!({"text":"hi"}), Some(drn)), sink());
         assert!(
             matches!(denied, CapabilityCallResult::Denied { .. }),
             "secret.use cannot be dropped by a wrapper: {denied:?}"
@@ -406,7 +415,7 @@ async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors()
         let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
         let before = descriptors();
         for _ in 0..3 {
-            let outcome = invoker.invoke("http-probe.purge", json!({"assetMode": "attach"}), None);
+            let outcome = invoker.invoke(CommandProposal::new("http-probe.purge", json!({"assetMode": "attach"}), None), sink());
             assert!(matches!(outcome, CapabilityCallResult::Failed { ref error, .. } if error.contains("effect executed") && error.contains("do not repeat")), "asset was falsely delivered: {outcome:?}");
             assert_eq!(fs::read_dir(&assets_root).unwrap().count(), 0, "assets must be unlinked after output");
         }

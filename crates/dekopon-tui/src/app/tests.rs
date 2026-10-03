@@ -116,7 +116,7 @@ fn a_finished_session_clears_busy_and_closes_the_turn() {
         sequence: 1,
         capability: "gh.issue.list".to_owned(),
         input: json!({"state": "open"}),
-        outcome: CallOutcome::Succeeded(json!([])),
+        outcome: CallOutcome::Succeeded,
         elapsed: Duration::from_millis(5),
     })));
     app.on_session_event(SessionEvent::ScriptFinished(Box::new(ScriptRun {

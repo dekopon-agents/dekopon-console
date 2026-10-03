@@ -22,20 +22,20 @@ thiserror = "2.0.19"
 tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "signal"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
-# Exact crates.io versions of one Dekopon release, never path or git dependencies.
-#
-# Exact =0.26.0 pins: these pre-1.0 crates and the broker wire must be tested as a set.
-# Not a git dependency either — `dekopon-provider-gh` pinned a branch once, and a `branch =`
-# dependency resolves by fetching the ref, so a deleted branch broke every cold-cache build.
-dekopon-agent = "=0.26.0"
-dekopon-broker-protocol = "=0.26.0"
-dekopon-config = "=0.26.0"
-dekopon-core = { version = "=0.26.0", default-features = false }
-dekopon-model = "=0.26.0"
-dekopon-protocol = { version = "=0.26.0", default-features = false }
-dekopon-process = "=0.26.0"
-dekopon-shell = "=0.26.0"
-dekopon-telemetry = { version = "=0.26.0", features = ["exporter"] }
+# Phase A prepublish migration only: all nine crates use one immutable core revision.
+# Before landing/releasing, replace these git dependencies with exact crates.io =0.31.0
+# pins and restore the published-dependency CI gate (C7-20).
+dekopon-agent = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+dekopon-broker-protocol = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+dekopon-config = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+dekopon-core = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf", default-features = false }
+dekopon-model = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+# ModelUsage moved out of dekopon-model in 0.31; this crate is already in core's lock.
+dekopon-model-token-governor = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+dekopon-protocol = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf", default-features = false }
+dekopon-process = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+dekopon-shell = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf" }
+dekopon-telemetry = { git = "https://github.com/dekopon-agents/dekopon", rev = "765d72149ab157e1095d3dad891bdd30d83c88cf", features = ["exporter"] }
 opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "logs"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 prost = "0.14.3"

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use dekopon_agent::prompt::{PromptOutcome, ReplyDisposition};
-use dekopon_model::model::ModelUsage;
+use dekopon_model_token_governor::ModelUsage;
 use serde_json::json;
 
 use super::{Transcript, TurnStatus};
@@ -50,7 +50,7 @@ fn nests_calls_under_the_script_that_dispatched_them() {
         sequence: 0,
         script: "gh issue list".to_owned(),
     });
-    transcript.absorb(call(1, "gh.issue.list", CallOutcome::Succeeded(json!([]))));
+    transcript.absorb(call(1, "gh.issue.list", CallOutcome::Succeeded));
     transcript.absorb(finished(0, 1));
     transcript.absorb(SessionEvent::ScriptStarted {
         sequence: 3,

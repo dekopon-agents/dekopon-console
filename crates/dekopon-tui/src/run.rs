@@ -16,11 +16,14 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use dekopon_agent::prompt::{History, HistoryLimits};
+use dekopon_agent::{
+    ShellRuntime,
+    prompt::{History, HistoryLimits, ScriptRuntime},
+};
 use dekopon_broker_protocol::BrokerClient;
 use dekopon_model::model::ChatModel;
 use dekopon_process::CancelSignal;
-use dekopon_shell::Interpreter;
+use dekopon_shell::CallBudget;
 use futures_util::StreamExt as _;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -615,10 +618,7 @@ async fn dispatch_in_context(
             stop.bind_broker(handle_cancel);
             let handle = tokio::spawn(
                 crate::session::run_turn(
-                    Arc::new(leg.with_cancel_signal(signal).with_progress(
-                        progress.clone(),
-                        options.prompt_limits.max_capability_calls,
-                    )),
+                    leg.with_cancel_signal(signal),
                     model,
                     prompt,
                     instructions(app),
@@ -691,8 +691,11 @@ async fn dispatch_in_context(
                     let script = tracing::info_span!("console.script");
                     let _script = script.enter();
                     tracing::info!(target: "dekopon_tui::audit", script = line.as_str(), "console manual script");
-                    let outcome = Interpreter::new(limits)
-                        .run(&line, &LegHandle(Arc::new(leg.with_cancel_signal(signal))));
+                    let outcome = ShellRuntime {
+                        invoker: LegHandle(Arc::new(leg.with_cancel_signal(signal))),
+                        limits,
+                        calls: CallBudget::new(limits.max_capability_calls),
+                    }.run_script(&line);
                     tracing::info!(target: "dekopon_tui::audit", output = outcome.output.as_str(), exit_code = outcome.exit_code.get(), "console manual output");
                     if sender
                         .send(SessionEvent::ShellFinished(ShellEntry {
