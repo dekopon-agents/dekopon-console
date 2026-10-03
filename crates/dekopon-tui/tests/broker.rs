@@ -27,9 +27,14 @@ use std::{
 use tempfile::TempDir;
 
 fn sink() -> Streams {
+    let (stdout, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    // Drain without retaining fixture output; a real stream endpoint is required by the wire.
+    drop(std::thread::spawn(move || {
+        std::io::copy(&mut reader, &mut std::io::sink()).unwrap();
+    }));
     Streams {
         stdin: None,
-        stdout: tempfile::tempfile().unwrap().into(),
+        stdout: stdout.into(),
     }
 }
 
