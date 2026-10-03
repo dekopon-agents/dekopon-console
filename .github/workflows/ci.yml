@@ -46,16 +46,19 @@ jobs:
           exact = rf"={number}\.{number}\.{number}(?:-{prerelease}(?:\.{prerelease})*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
           for name in core:
               dep = deps.get(name)
-              version = dep if isinstance(dep, str) else dep.get("version") if isinstance(dep, dict) else None
-              if not isinstance(version, str) or re.fullmatch(exact, version) is None:
-                  raise SystemExit(f"{name} must have an exact = version")
+              if dep is None or (isinstance(dep, dict) and dep.get("package", name) != name):
+                  raise SystemExit(f"{name} must name its required package")
           for name, dep in deps.items():
               package = dep.get("package", name) if isinstance(dep, dict) else name
               if not (name.startswith("dekopon-") or package.startswith("dekopon-")):
                   continue
               if name == package == "dekopon-tui":
-                  if not isinstance(dep, dict) or dep.get("path") != "crates/dekopon-tui" or dep.get("version") != "0.11.1" or "git" in dep:
+                  if not isinstance(dep, dict) or dep.get("path") != "crates/dekopon-tui" or dep.get("version") != "0.11.1" or any(key in dep for key in ("git", "registry", "registry-index")):
                       raise SystemExit("only the versioned local dekopon-tui path is allowed")
-              elif isinstance(dep, dict) and ("git" in dep or "path" in dep):
-                  raise SystemExit(f"{name} must not use git/path")
+                  continue
+              version = dep if isinstance(dep, str) else dep.get("version") if isinstance(dep, dict) else None
+              if not isinstance(version, str) or re.fullmatch(exact, version) is None:
+                  raise SystemExit(f"{name} must have an exact = version")
+              if isinstance(dep, dict) and any(key in dep for key in ("git", "path", "registry", "registry-index")):
+                  raise SystemExit(f"{name} must use crates.io, not git/path/alternate registry")
           PY
