@@ -402,18 +402,20 @@ dependencies = [
 
 [[package]]
 name = "dekopon-agent"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a61f36c83938da45f5e4d55e81699561f43355761940ee7444e71cbbb1a217"
+checksum = "9bf11e146e89b8a1978a57cb7408ff4b953866625e1d973ec869c3460f112181"
 dependencies = [
  "dekopon-broker-protocol",
  "dekopon-config",
  "dekopon-core",
  "dekopon-model",
+ "dekopon-model-token-governor",
  "dekopon-process",
  "dekopon-shell",
  "dekopon-telemetry",
  "getrandom 0.4.3",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror",
@@ -423,9 +425,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-broker-protocol"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22beb510373615a684e2a85b5f7a6ec2a1c3735e0b13d78791599904b4b5c559"
+checksum = "ddb83ad238b3562435aae0b4e19b79daef2fe40281f33981da7fe559584d40bb"
 dependencies = [
  "dekopon-capability",
  "dekopon-core",
@@ -439,9 +441,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-capability"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58098d6594d399d7fc34f78596a99cf7d276dd76b014ea54ade1af4dc0006538"
+checksum = "905d7185f3f1066f965b6800e040a5be9e559896e7d316661c1d55bfead3b00c"
 dependencies = [
  "dekopon-core",
  "serde",
@@ -451,9 +453,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-config"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f46a8264c33d812e2e7388bc25e25fad5f042d3667a37ce105d1d8064c135db"
+checksum = "8d62a66ca1547f1a5bc25a45422f592a0492e00350018d07f27127a3bc02471f"
 dependencies = [
  "dekopon-core",
  "dekopon-protocol",
@@ -464,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "dekopon-console"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "dekopon-config",
@@ -484,9 +486,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-core"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20df115637a74f86363973863e7a5a9381a5050ef7762ee839235996dc83ca4"
+checksum = "b038bd3c2eeb8d682da76b87b1d3e413ab6856aabc459ccc41d313c07ab9f5a2"
 dependencies = [
  "base64 0.23.1",
  "libc",
@@ -497,14 +499,16 @@ dependencies = [
 
 [[package]]
 name = "dekopon-model"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2444e08ff1d8d437e8d05034b6e0e2b75f0dd97a2e24ba68ff6edf67226f01"
+checksum = "b4de8dfb0a5aa460b863dfb1b623053d2d481b0eb02e5c62eb65953fb81d1b53"
 dependencies = [
  "base64 0.23.1",
  "dekopon-core",
+ "dekopon-model-token-governor",
  "futures-util",
  "http",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
@@ -516,21 +520,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "dekopon-process"
-version = "0.26.0"
+name = "dekopon-model-token-governor"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a95560c13b5a3296c7d5c32929ab74a50f0fcf6e4733eb34e76ddc2d7a8bdbcb"
+checksum = "6ab2a8ffbc08a20e6ef6d6b68e6ed27fce93267f3029118c8fa0269484602e0d"
+dependencies = [
+ "dekopon-core",
+ "parking_lot",
+ "tracing",
+]
+
+[[package]]
+name = "dekopon-process"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c88a8d6652280b011bdb50e15ab0a2d9a7a1fc45a4428f829f43fea8f5b5872e"
 dependencies = [
  "async-trait",
+ "parking_lot",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "dekopon-protocol"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a61a46914b16e2be1e2f32f21c4b7127d6fe1944d8785ddaac44a9ef6730f1f0"
+checksum = "23382fc0d2344e480a9eaf42b477f36018ca6f24466d2e18b053d3dda5c5f012"
 dependencies = [
  "dekopon-core",
  "serde",
@@ -538,12 +554,14 @@ dependencies = [
 
 [[package]]
 name = "dekopon-provider-sdk"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f91b91b705078184d9ca4315a4d00852b3107068cdf26c89177f8a8438240619"
+checksum = "8cc59e602e6d6d101e2a4cc9c00284d325f2c26f6bf800acb556bfe6621954bc"
 dependencies = [
+ "clap",
  "dekopon-capability",
  "dekopon-core",
+ "schemars",
  "serde",
  "serde_json",
  "wit-bindgen 0.62.0",
@@ -551,16 +569,18 @@ dependencies = [
 
 [[package]]
 name = "dekopon-shell"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57df9bfe582a768e3114339af0029ff93a478558287b3e0ca66a0c74bf5eb548"
+checksum = "14930b76b9c07e12ca0f49e9d8a2e4604988b132a6b6a3b10ad7e63ff78462ba"
 dependencies = [
  "base64 0.23.1",
  "dekopon-core",
  "jaq-core",
  "jaq-json",
  "jaq-std",
+ "parking_lot",
  "regex-bites",
+ "rustix",
  "serde_json",
  "thiserror",
  "tracing",
@@ -568,9 +588,9 @@ dependencies = [
 
 [[package]]
 name = "dekopon-telemetry"
-version = "0.26.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3b18bc98afe258eea8530934156b003db5a7a040b844fdffaa524b3f0d9454b"
+checksum = "378baf1996b30f8223f6b64caa9684700ef621c21da578b8ecbc3798ad92655c"
 dependencies = [
  "async-trait",
  "opentelemetry",
@@ -578,6 +598,7 @@ dependencies = [
  "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "parking_lot",
  "reqwest",
  "serde",
  "thiserror",
@@ -596,6 +617,7 @@ dependencies = [
  "dekopon-config",
  "dekopon-core",
  "dekopon-model",
+ "dekopon-model-token-governor",
  "dekopon-process",
  "dekopon-protocol",
  "dekopon-shell",
@@ -1954,6 +1976,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ref-cast"
+version = "1.0.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "216e8f773d7923bcba9ceb86a86c93cabb3903a11872fc3f138c49630e50b96d"
+dependencies = [
+ "ref-cast-impl",
+]
+
+[[package]]
+name = "ref-cast-impl"
+version = "1.0.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9283685feec7d69af75fb0e858d5e7378f33fe4fc699383b2916ab9273e03c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2110,6 +2152,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "schemars"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2151,6 +2218,17 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",

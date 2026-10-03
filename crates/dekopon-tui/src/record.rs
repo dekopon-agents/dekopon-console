@@ -8,7 +8,8 @@
 //! - [`RecordingRuntime`] wraps [`ScriptRuntime`], so it sees each model-authored script and its
 //!   outcome, which is one model turn's worth of work.
 //! - [`RecordingInvoker`] wraps [`CapabilityInvoker`], so it sees every capability the script
-//!   dispatched, with the exact JSON in and the exact result out.
+//!   dispatched, with the exact JSON proposal and terminal status. Provider stdout stays on the
+//!   shell's descriptor stream; observation never drains or replaces it.
 //!
 //! Both forward every method unchanged and neither can influence a session: an observer that could
 //! deny a call would be a second authorization path, and there is only ever one of those.
@@ -26,10 +27,10 @@ use dekopon_agent::{
     progress::{ProgressEvent, ProgressSink},
     prompt::{ModelUsageObserver, PromptOutcome, ScriptRuntime},
 };
-use dekopon_core::SecretUseProposal;
-use dekopon_model::model::ModelUsage;
+use dekopon_model_token_governor::ModelUsage;
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandRun, ScriptOutcome,
+    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandProposal, CommandRun,
+    JobControl, ScriptOutcome, Streams,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -43,7 +44,11 @@ use crate::app::{Payload, ShellEntry};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CallOutcome {
     /// The broker authorized it and the provider answered.
-    Succeeded(Value),
+    Succeeded,
+    /// Successful execution with a provider/gateway diagnostic, not a JSON output payload.
+    SucceededWithStderr(String),
+    /// Provider exit status and stderr, including downstream-close status 141.
+    Exited { status: u8, stderr: String },
     /// Policy refused, with the broker's stable public reason.
     Denied(String),
     /// It ran and failed.
@@ -57,7 +62,8 @@ impl CallOutcome {
     #[must_use]
     pub const fn label(&self) -> &'static str {
         match self {
-            Self::Succeeded(_) => "succeeded",
+            Self::Succeeded | Self::SucceededWithStderr(_) => "succeeded",
+            Self::Exited { .. } => "exited",
             Self::Denied(_) => "denied",
             Self::Failed(_) => "failed",
             Self::NotFound => "not-found",
@@ -68,7 +74,14 @@ impl CallOutcome {
 impl From<&CapabilityCallResult> for CallOutcome {
     fn from(result: &CapabilityCallResult) -> Self {
         match result {
-            CapabilityCallResult::Succeeded(output) => Self::Succeeded(output.clone()),
+            CapabilityCallResult::Succeeded => Self::Succeeded,
+            CapabilityCallResult::SucceededWithStderr(stderr) => {
+                Self::SucceededWithStderr(stderr.clone())
+            }
+            CapabilityCallResult::Exited { status, stderr } => Self::Exited {
+                status: status.get(),
+                stderr: stderr.clone(),
+            },
             CapabilityCallResult::Denied { reason } => Self::Denied(reason.clone()),
             CapabilityCallResult::Failed { error, .. } => Self::Failed(error.clone()),
             CapabilityCallResult::NotFound => Self::NotFound,
@@ -92,17 +105,11 @@ pub struct CapabilityCall {
 }
 
 impl CapabilityCall {
-    /// The JSON halves of this call, in the order the pane draws them.
-    ///
-    /// A denied, failed, or not-found call has an input and no output, so this yields one pair
-    /// rather than two: there is nothing to redact, expand, or reveal on the other side.
+    /// The proposal input. Provider output is a stream, retained by the script rather than
+    /// fabricated as a per-capability JSON result.
     #[must_use]
     pub fn payloads(&self) -> Vec<(Payload, &Value)> {
-        let mut halves = vec![(Payload::Input, &self.input)];
-        if let CallOutcome::Succeeded(output) = &self.outcome {
-            halves.push((Payload::Output, output));
-        }
-        halves
+        vec![(Payload::Input, &self.input)]
     }
 }
 
@@ -210,6 +217,18 @@ impl<I> RecordingInvoker<I> {
 }
 
 impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
+    fn cancelled(&self) -> bool {
+        self.inner.cancelled()
+    }
+
+    fn script_started(&self, timeout: Duration) {
+        self.inner.script_started(timeout);
+    }
+
+    fn job_control(&self) -> Option<&dyn JobControl> {
+        self.inner.job_control()
+    }
+
     fn granted(&self) -> Vec<String> {
         self.inner.granted()
     }
@@ -238,7 +257,7 @@ impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
         self.inner.describe(capability)
     }
 
-    fn run_command(&self, word: &str, argv: &[String], stdin: Option<&str>) -> Option<CommandRun> {
+    fn run_command(&self, word: &str, argv: &[String], stdin: bool) -> Option<CommandRun> {
         self.inner.run_command(word, argv, stdin)
     }
 
@@ -246,21 +265,18 @@ impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
         self.inner.script_finished();
     }
 
-    fn invoke(
-        &self,
-        capability: &str,
-        input: Value,
-        secret_use: Option<SecretUseProposal>,
-    ) -> CapabilityCallResult {
+    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
         let sequence = self.sequence.next();
-        let recorded = input.clone();
+        let capability = proposal.capability.clone();
+        let recorded = proposal.input.clone();
         let started = Instant::now();
-        let result = self.inner.invoke(capability, input, secret_use);
+        // Pass the owned proposal (including secret intent and report) and descriptors unchanged.
+        let result = self.inner.invoke(proposal, streams);
         emit(
             &self.events,
             SessionEvent::Capability(Box::new(CapabilityCall {
                 sequence,
-                capability: capability.to_owned(),
+                capability,
                 input: recorded,
                 outcome: CallOutcome::from(&result),
                 elapsed: started.elapsed(),
@@ -289,7 +305,11 @@ impl<R> RecordingRuntime<R> {
 }
 
 impl<R: ScriptRuntime> ScriptRuntime for RecordingRuntime<R> {
-    fn run_script(&self, script: &str, max_capability_calls: u32) -> ScriptOutcome {
+    fn capability_calls_used(&self) -> u32 {
+        self.inner.capability_calls_used()
+    }
+
+    fn run_script(&self, script: &str) -> ScriptOutcome {
         let sequence = self.sequence.next();
         emit(
             &self.events,
@@ -299,7 +319,7 @@ impl<R: ScriptRuntime> ScriptRuntime for RecordingRuntime<R> {
             },
         );
         let started = Instant::now();
-        let outcome = self.inner.run_script(script, max_capability_calls);
+        let outcome = self.inner.run_script(script);
         emit(
             &self.events,
             SessionEvent::ScriptFinished(Box::new(ScriptRun {
@@ -388,5 +408,7 @@ impl ModelUsageObserver for RecordingUsage {
     }
 }
 
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod tests;

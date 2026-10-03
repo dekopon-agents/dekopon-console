@@ -30,14 +30,35 @@ jobs:
       - name: Reject path and git dependencies on dekopon crates
         run: |
           set -euo pipefail
-          if grep -nE '^dekopon[a-z-]* *=.*\b(path|git) *=' Cargo.toml \
-             | grep -v 'path = "crates/dekopon-tui"'; then
-            echo "dekopon crates must be pinned to crates.io versions" >&2
-            exit 1
-          fi
-          # ...and the pin has to stay exact, or a pre-1.0 patch release is picked up silently.
-          if grep -nE '^dekopon-(agent|broker-protocol|config|core|model|protocol|shell) *=' Cargo.toml \
-             | grep -v '"=0\.'; then
-            echo 'every crates.io dekopon dependency must use an exact = requirement' >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          import re
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              deps = tomllib.load(manifest)["workspace"]["dependencies"]
+          core = (
+              "dekopon-agent", "dekopon-broker-protocol", "dekopon-config",
+              "dekopon-core", "dekopon-model", "dekopon-model-token-governor",
+              "dekopon-process", "dekopon-protocol", "dekopon-shell", "dekopon-telemetry",
+          )
+          number = r"(?:0|[1-9][0-9]*)"
+          prerelease = rf"(?:{number}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          exact = rf"={number}\.{number}\.{number}(?:-{prerelease}(?:\.{prerelease})*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+          for name in core:
+              dep = deps.get(name)
+              if dep is None or (isinstance(dep, dict) and dep.get("package", name) != name):
+                  raise SystemExit(f"{name} must name its required package")
+          for name, dep in deps.items():
+              package = dep.get("package", name) if isinstance(dep, dict) else name
+              if not (name.startswith("dekopon-") or package.startswith("dekopon-")):
+                  continue
+              if name == package == "dekopon-tui":
+                  if not isinstance(dep, dict) or dep.get("path") != "crates/dekopon-tui" or dep.get("version") != "0.11.1" or any(key in dep for key in ("git", "registry", "registry-index")):
+                      raise SystemExit("only the versioned local dekopon-tui path is allowed")
+                  continue
+              version = dep if isinstance(dep, str) else dep.get("version") if isinstance(dep, dict) else None
+              if not isinstance(version, str) or re.fullmatch(exact, version) is None:
+                  raise SystemExit(f"{name} must have an exact = version")
+              if isinstance(dep, dict) and any(key in dep for key in ("git", "path", "registry", "registry-index")):
+                  raise SystemExit(f"{name} must use crates.io, not git/path/alternate registry")
+          PY

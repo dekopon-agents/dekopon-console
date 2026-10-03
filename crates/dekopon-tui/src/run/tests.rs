@@ -3,13 +3,12 @@ use std::{io::IsTerminal as _, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use dekopon_agent::prompt::{ConversationTurn, History};
 use dekopon_broker_protocol::{BrokerClient, FrameLimits};
-use dekopon_core::SecretUseProposal;
 use dekopon_protocol::{Agent, AgentKind, AgentSpec, ApiVersion, ObjectMeta};
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandRun, Interpreter, Limits,
+    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandProposal, CommandRun,
+    Interpreter, Limits, Streams,
 };
-use serde_json::Value;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -379,7 +378,7 @@ impl CapabilityInvoker for BlockingCommands {
     fn describe(&self, _: &str) -> Option<CapabilityDescription> {
         None
     }
-    fn run_command(&self, word: &str, argv: &[String], _: Option<&str>) -> Option<CommandRun> {
+    fn run_command(&self, word: &str, argv: &[String], _: bool) -> Option<CommandRun> {
         if word != "probe" {
             return None;
         }
@@ -387,14 +386,11 @@ impl CapabilityInvoker for BlockingCommands {
             capability: format!("probe.{}", argv.first()?),
             input: json!({}),
             secret_use: None,
+            report: None,
         })
     }
-    fn invoke(
-        &self,
-        capability: &str,
-        _: Value,
-        _: Option<SecretUseProposal>,
-    ) -> CapabilityCallResult {
+    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+        let capability = proposal.capability;
         if self.stop.is_requested() {
             return CapabilityCallResult::Denied {
                 reason: "session-cancelled".into(),
@@ -409,7 +405,7 @@ impl CapabilityInvoker for BlockingCommands {
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap();
         }
-        CapabilityCallResult::Succeeded(json!({"effect": capability}))
+        streams.reply(&json!({"effect": capability}))
     }
 }
 
@@ -461,7 +457,7 @@ fn esc_during_an_accepted_command_prevents_the_next_broker_effect() {
     );
     assert!(matches!(
         app.call_at(calls[0]).unwrap().outcome,
-        CallOutcome::Succeeded(_)
+        CallOutcome::Succeeded
     ));
     assert!(matches!(
         app.call_at(calls[1]).unwrap().outcome,
@@ -487,14 +483,14 @@ fn cancellation_does_not_erase_an_effect_the_broker_already_accepted() {
         sequence: 1,
         capability: "probe.action".into(),
         input: json!({}),
-        outcome: CallOutcome::Succeeded(json!({"effect": "complete"})),
+        outcome: CallOutcome::Succeeded,
         elapsed: Duration::from_millis(5),
     })));
     assert!(app.transcript.turns()[0].stop_requested);
     assert!(
         matches!(
             app.transcript.turns()[0].scripts[0].calls[0].outcome,
-            CallOutcome::Succeeded(_)
+            CallOutcome::Succeeded
         ),
         "accepted effects are still visible after a stop request"
     );

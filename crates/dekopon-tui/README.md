@@ -1,6 +1,6 @@
 # dekopon-tui
 
-The session and rendering library for [`dekopon-console`](../../README.md). It runs a bounded `dekopon-agent` prompt loop over a `BrokerLeg` connected to an authenticated Unix peer, without broker policy, provider credentials, or a direct Wasm host. The broker decides every capability proposal; this library does not authorize subjects or tool effects. Exact published Dekopon dependency pins are `=0.26.0`.
+The session and rendering library for [`dekopon-console`](../../README.md). It runs a bounded `dekopon-agent` prompt loop over a `BrokerLeg` connected to an authenticated Unix peer, without broker policy, provider credentials, or a direct Wasm host. The broker decides every capability proposal; this library does not authorize subjects or tool effects. Exact published Dekopon dependency pins are `=0.31.0`.
 
 An agent is orchestration configuration, not a human identity. `OperatorProfile` binds an agent to a typed `ExternalSubject` and optional typed `ChatScopeClaim`; the broker must map/attest the console peer UID and authorize `agent.prompt` and its effective surface. Scope in the UI is a **REQUESTED** claim, not a verified broker echo. Conversation narrowing lives in broker Cedar policy; see the root README. Neither a picker nor a profile restricts what arbitrary code running as this peer can claim.
 

@@ -5,9 +5,10 @@ use dekopon_agent::{
     prompt::ScriptRuntime,
 };
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, ExitCode, ScriptOutcome,
+    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandProposal, ExitCode,
+    ScriptOutcome, Streams,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::{
@@ -34,14 +35,15 @@ impl CapabilityInvoker for FixedInvoker {
         })
     }
 
-    fn invoke(
-        &self,
-        capability: &str,
-        _input: Value,
-        _secret_use: Option<dekopon_core::SecretUseProposal>,
-    ) -> CapabilityCallResult {
-        match capability {
-            "gh.issue.list" => CapabilityCallResult::Succeeded(json!([{"number": 7}])),
+    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+        match proposal.capability.as_str() {
+            "gh.issue.list" => {
+                use std::io::Write as _;
+                std::fs::File::from(streams.stdout)
+                    .write_all(b"[{\"number\":7}]\n")
+                    .unwrap();
+                CapabilityCallResult::Succeeded
+            }
             "gh.pull-request.merge" => CapabilityCallResult::Denied {
                 reason: "unconstrained-capability".to_owned(),
             },
@@ -56,11 +58,19 @@ struct FixedRuntime<'invoker> {
 }
 
 impl ScriptRuntime for FixedRuntime<'_> {
-    fn run_script(&self, _script: &str, _max_capability_calls: u32) -> ScriptOutcome {
-        self.invoker
-            .invoke("gh.issue.list", json!({"state": "open"}), None);
-        self.invoker
-            .invoke("gh.pull-request.merge", json!({"number": 7}), None);
+    fn capability_calls_used(&self) -> u32 {
+        2
+    }
+
+    fn run_script(&self, _script: &str) -> ScriptOutcome {
+        self.invoker.invoke(
+            CommandProposal::new("gh.issue.list", json!({"state": "open"}), None),
+            sink(),
+        );
+        self.invoker.invoke(
+            CommandProposal::new("gh.pull-request.merge", json!({"number": 7}), None),
+            sink(),
+        );
         ScriptOutcome {
             output: "two calls\n".to_owned(),
             exit_code: ExitCode::SUCCESS,
@@ -72,6 +82,13 @@ impl ScriptRuntime for FixedRuntime<'_> {
 
     fn command_words(&self) -> Vec<String> {
         vec!["gh".to_owned()]
+    }
+}
+
+fn sink() -> Streams {
+    Streams {
+        stdin: None,
+        stdout: tempfile::tempfile().unwrap().into(),
     }
 }
 
@@ -99,7 +116,7 @@ fn reports_a_script_and_every_call_inside_it_in_order() {
     let invoker = RecordingInvoker::new(FixedInvoker, sender.clone(), sequence.clone());
     let runtime = RecordingRuntime::new(FixedRuntime { invoker: &invoker }, sender, sequence);
 
-    let outcome = runtime.run_script("gh issue list", 8);
+    let outcome = runtime.run_script("gh issue list");
     assert_eq!(
         outcome.capability_calls, 2,
         "the outcome must pass through unchanged"
@@ -126,10 +143,7 @@ fn reports_a_script_and_every_call_inside_it_in_order() {
         json!({"state": "open"}),
         "the exact dispatched input is kept"
     );
-    assert_eq!(
-        first.outcome,
-        CallOutcome::Succeeded(json!([{"number": 7}]))
-    );
+    assert_eq!(first.outcome, CallOutcome::Succeeded);
 
     let SessionEvent::Capability(second) = &events[2] else {
         panic!("third event must be a capability: {:?}", events[2]);
@@ -178,14 +192,17 @@ fn a_closed_console_does_not_stop_a_session() {
     // A call the broker has already accepted is not something an observer may abort, so a torn-down
     // console must not change the result the session sees.
     assert_eq!(
-        CallOutcome::from(&invoker.invoke("gh.issue.list", json!({}), None)),
-        CallOutcome::Succeeded(json!([{"number": 7}]))
+        CallOutcome::from(&invoker.invoke(
+            CommandProposal::new("gh.issue.list", json!({}), None),
+            sink()
+        )),
+        CallOutcome::Succeeded
     );
 }
 
 #[test]
 fn outcome_labels_are_stable() {
-    assert_eq!(CallOutcome::Succeeded(Value::Null).label(), "succeeded");
+    assert_eq!(CallOutcome::Succeeded.label(), "succeeded");
     assert_eq!(CallOutcome::Denied(String::new()).label(), "denied");
     assert_eq!(CallOutcome::Failed(String::new()).label(), "failed");
     assert_eq!(CallOutcome::NotFound.label(), "not-found");
@@ -195,7 +212,10 @@ fn outcome_labels_are_stable() {
 fn elapsed_is_measured_around_the_seam() {
     let (sender, mut receiver) = unbounded_channel();
     let invoker = RecordingInvoker::new(FixedInvoker, sender, Sequence::default());
-    invoker.invoke("gh.issue.list", json!({}), None);
+    invoker.invoke(
+        CommandProposal::new("gh.issue.list", json!({}), None),
+        sink(),
+    );
 
     let events = drain(&mut receiver);
     let SessionEvent::Capability(call) = &events[0] else {

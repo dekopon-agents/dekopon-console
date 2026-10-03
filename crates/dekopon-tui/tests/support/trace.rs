@@ -234,7 +234,7 @@ async fn console_turn_exports_one_causal_trace_through_model_script_broker_and_p
             let agent = serde_json::from_value(json!({"apiVersion":"dekopon.dev/v1alpha1", "kind":"Agent", "metadata":{"name":"reviewer"}, "spec":{"description":"synthetic agent", "enabled":true}})).unwrap();
             let (events, mut receiver) = dekopon_tui::session::session_channel();
             let progress = Arc::new(dekopon_tui::record::RecordingProgress::new(events.clone()));
-            let history = tokio::spawn(dekopon_tui::session::run_turn(Arc::new(leg), Arc::new(model), "synthetic-prompt".into(), Some("synthetic-instructions".into()), agent, options.clone(), History::new(options.history_limits), Default::default(), progress, events).in_current_span()).await.unwrap().unwrap();
+            let history = tokio::spawn(dekopon_tui::session::run_turn(leg, Arc::new(model), "synthetic-prompt".into(), Some("synthetic-instructions".into()), agent, options.clone(), History::new(options.history_limits), Default::default(), progress, events).in_current_span()).await.unwrap().unwrap();
             assert_eq!(history.len(), 1);
             let mut finished = false;
             while let Some(event) = receiver.recv().await {

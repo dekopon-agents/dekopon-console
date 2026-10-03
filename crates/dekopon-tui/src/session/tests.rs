@@ -103,25 +103,55 @@ fn the_empty_local_leg_claims_nothing() {
     assert!(!direct.has_command_word("gh"));
     assert!(direct.describe("gh.issue.list").is_none());
     assert!(matches!(
-        direct.invoke("gh.issue.list", json!({}), None),
+        direct.invoke(
+            dekopon_shell::CommandProposal::new("gh.issue.list", json!({}), None),
+            sink()
+        ),
         dekopon_shell::CapabilityCallResult::NotFound
     ));
     let drn = dekopon_core::SecretUseProposal::HttpBearer {
         secret: "drn:com.xrl:secret:prod:api/token".parse().unwrap(),
     };
     assert!(matches!(
-        direct.invoke("gh.issue.list", json!({}), Some(drn)),
+        direct.invoke(
+            dekopon_shell::CommandProposal::new("gh.issue.list", json!({}), Some(drn)),
+            sink()
+        ),
         dekopon_shell::CapabilityCallResult::Denied { .. }
     ));
 }
 
 #[test]
 fn completed_asset_effect_is_not_reported_as_console_delivery() {
-    let output = json!({"result": {"image": "created"}, "assetNote": "[gateway: capability executed but this embedder has no asset store; received asset effects could not be retained or delivered; do not repeat the paid call]"});
-    let result = refuse_unpresented_assets(dekopon_shell::CapabilityCallResult::Succeeded(output));
+    let stderr = "[gateway: capability executed but this embedder has no asset store; received asset effects could not be retained or delivered; do not repeat the paid call]".to_owned();
+    let result = refuse_unpresented_assets(
+        dekopon_shell::CapabilityCallResult::SucceededWithStderr(stderr),
+    );
     assert!(
         matches!(result, dekopon_shell::CapabilityCallResult::Failed { error, .. } if error.contains("effect executed") && error.contains("do not repeat"))
     );
+}
+
+fn sink() -> dekopon_shell::Streams {
+    dekopon_shell::Streams {
+        stdin: None,
+        stdout: tempfile::tempfile().unwrap().into(),
+    }
+}
+
+#[test]
+fn ordinary_stderr_and_nonzero_status_are_not_reclassified_as_asset_delivery() {
+    use dekopon_shell::CapabilityCallResult;
+    for result in [
+        CapabilityCallResult::Succeeded,
+        CapabilityCallResult::SucceededWithStderr("provider warning\n".into()),
+        CapabilityCallResult::Exited {
+            status: std::num::NonZeroU8::new(141).unwrap(),
+            stderr: "reader closed".into(),
+        },
+    ] {
+        assert_eq!(refuse_unpresented_assets(result.clone()), result);
+    }
 }
 
 #[test]
