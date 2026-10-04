@@ -472,9 +472,8 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
 }
 
 #[tokio::test]
-async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors() {
-    // Run only with the separately supplied latest-main asset fixture; the published 0.19.0
-    // probe broker test above does not imply support for unpublished broker model APIs.
+async fn executed_asset_effect_registers_descriptor_through_real_broker() {
+    // Verified v0.33.0 broker and provider component; no model or paid provider call.
     let Some(fixture) = broker_with_telemetry(true, true, false, None).await else {
         eprintln!("asset fixture env absent; integration not exercised");
         return;
@@ -489,17 +488,30 @@ async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors()
         .await
         .unwrap();
     assert_eq!(leg.effective_capabilities().len(), 1);
-    tokio::task::spawn_blocking(move || {
-        let invoker = LegHandle(Arc::new(leg));
-        let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
-        let before = descriptors();
-        for _ in 0..3 {
-            let outcome = invoker.invoke(CommandProposal::new("http-probe.purge", json!({"assetMode": "attach"}), None), sink(), &TreeContext::new(Limits::default(), CallBudget::new(4)));
-            assert!(matches!(outcome, CapabilityCallResult::Failed { ref error, .. } if error.contains("effect executed") && error.contains("do not repeat")), "asset was falsely delivered: {outcome:?}");
-            assert_eq!(fs::read_dir(&assets_root).unwrap().count(), 0, "assets must be unlinked after output");
-        }
-        assert_eq!(descriptors(), before, "completed effects left descriptors open");
-    }).await.unwrap();
+    let outcome = tokio::task::spawn_blocking(move || {
+        LegHandle(Arc::new(leg)).invoke(
+            CommandProposal::new("http-probe.purge", json!({"assetMode": "attach"}), None),
+            sink(),
+            &TreeContext::new(Limits::default(), CallBudget::new(4)),
+        )
+    })
+    .await
+    .unwrap();
+    let CapabilityCallResult::SucceededWithStderr(note) = outcome else {
+        panic!("asset effect must succeed with a registration note: {outcome:?}");
+    };
+    assert!(
+        note.contains("chat-asset:1"),
+        "missing registration id: {note}"
+    );
+    assert!(note.contains("text/plain"), "missing media type: {note}");
+    assert!(note.contains("stored bytes"), "missing byte size: {note}");
+    assert!(!note.contains("no asset store"), "old refusal: {note}");
+    assert_eq!(
+        fs::read_dir(&assets_root).unwrap().count(),
+        0,
+        "broker assets must be unlinked after output"
+    );
 }
 
 #[tokio::test]

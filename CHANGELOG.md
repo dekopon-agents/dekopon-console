@@ -1,5 +1,10 @@
 # Console changelog
 
+## 0.7.0
+
+- Accept broker-returned assets using published core 0.33.0 attachment APIs and a per-agent-leg, volatile 16-item / 64 MiB memory store. Print the registration ID, media type and stored byte count without claiming delivery; remove the old post-effect refusal. No durable persistence or chat transport.
+- Exercise real asset registration with a verified v0.33.0 broker and synthetic Wasm provider (red on v0.6.0, green on this branch); retain ordinary stderr and nonzero status behavior.
+
 ## 0.6.0
 
 - Target published Dekopon 0.33.0 with exact core pins; pass the shell tree context through console broker invokers so broker child-script upcalls execute under the shared script budget.
