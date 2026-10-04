@@ -14,6 +14,7 @@ use std::{
 
 use dekopon_agent::{
     BrokerLeg, BrokerLegError, SessionInvoker, ShellRuntime,
+    attachment::ReplyAttachments,
     meta::{
         AgentConfigView, EffectiveCapabilityView, MemoryConfigView, SessionConfigView, SkillView,
     },
@@ -324,9 +325,17 @@ pub async fn open_agent(
         Some(scope) => Attestation::for_chat(subject, agent, scope),
         None => Attestation::for_subject(subject, agent),
     };
-    BrokerLeg::connect(client, Some(attestation))
+    let leg = BrokerLeg::connect(client, Some(attestation))
         .await
-        .map_err(SessionError::Leg)
+        .map_err(SessionError::Leg)?;
+    let store = Arc::new(assets::ConsoleAssets::default());
+    Ok(
+        leg.with_provider_attachments(Arc::new(ReplyAttachments::new(
+            0,
+            store,
+            "console (no delivery)".to_owned(),
+        ))),
+    )
 }
 
 /// The local leg of a console session, which is deliberately empty.
@@ -699,22 +708,7 @@ impl CapabilityInvoker for LegHandle {
         streams: Streams,
         tree: &dekopon_shell::TreeContext,
     ) -> CapabilityCallResult {
-        refuse_unpresented_assets(self.0.invoke(proposal, streams, tree))
-    }
-}
-
-/// Never report a completed provider effect as a successful console asset delivery.
-/// The core leg has already released any returned descriptors when this runs; a failed outcome
-/// names that fact and warns against repeating the effect, rather than claiming no effect occurred.
-fn refuse_unpresented_assets(result: CapabilityCallResult) -> CapabilityCallResult {
-    match &result {
-        CapabilityCallResult::SucceededWithStderr(stderr)
-            if stderr.contains("this embedder has no asset store") =>
-            CapabilityCallResult::Failed {
-                error: "provider effect executed, but console cannot retain or deliver returned assets; do not repeat the call".into(),
-                detail: None,
-            },
-        _ => result,
+        self.0.invoke(proposal, streams, tree)
     }
 }
 
@@ -726,6 +720,8 @@ pub fn session_channel() -> (
 ) {
     unbounded_channel()
 }
+
+mod assets;
 
 #[cfg(test)]
 mod tests;
