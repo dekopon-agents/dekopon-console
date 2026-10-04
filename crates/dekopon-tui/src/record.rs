@@ -265,13 +265,18 @@ impl<I: CapabilityInvoker> CapabilityInvoker for RecordingInvoker<I> {
         self.inner.script_finished();
     }
 
-    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        proposal: CommandProposal,
+        streams: Streams,
+        tree: &dekopon_shell::TreeContext,
+    ) -> CapabilityCallResult {
         let sequence = self.sequence.next();
         let capability = proposal.capability.clone();
         let recorded = proposal.input.clone();
         let started = Instant::now();
         // Pass the owned proposal (including secret intent and report) and descriptors unchanged.
-        let result = self.inner.invoke(proposal, streams);
+        let result = self.inner.invoke(proposal, streams, tree);
         emit(
             &self.events,
             SessionEvent::Capability(Box::new(CapabilityCall {

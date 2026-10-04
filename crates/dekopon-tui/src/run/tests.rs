@@ -389,7 +389,12 @@ impl CapabilityInvoker for BlockingCommands {
             report: None,
         })
     }
-    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        proposal: CommandProposal,
+        streams: Streams,
+        _tree: &dekopon_shell::TreeContext,
+    ) -> CapabilityCallResult {
         let capability = proposal.capability;
         if self.stop.is_requested() {
             return CapabilityCallResult::Denied {

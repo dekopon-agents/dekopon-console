@@ -3,11 +3,13 @@
 
 #![cfg(unix)]
 
+use dekopon_agent::{ShellRuntime, prompt::ScriptRuntime as _};
 use dekopon_broker_protocol::{BrokerClient, ChatScopeClaim, FrameLimits};
 use dekopon_core::{AgentId, ExternalSubject};
 use dekopon_core::{SecretDrn, SecretUseProposal};
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityInvoker as _, CommandProposal, Interpreter, Limits, Streams,
+    CallBudget, CapabilityCallResult, CapabilityInvoker as _, CommandProposal, Interpreter, Limits,
+    Streams, TreeContext,
 };
 use dekopon_tui::{
     App,
@@ -25,6 +27,9 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+
+#[path = "spawn_component.rs"]
+mod spawn_component;
 
 fn sink() -> Streams {
     let (stdout, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -60,20 +65,25 @@ fn write_private(path: &Path, contents: impl AsRef<[u8]>) {
 }
 
 async fn broker(mapped: bool) -> Option<BrokerFixture> {
-    broker_with_telemetry(mapped, false, None).await
+    broker_with_telemetry(mapped, false, false, None).await
 }
 
 async fn broker_with_telemetry(
     mapped: bool,
     asset: bool,
+    spawn: bool,
     endpoint: Option<&str>,
 ) -> Option<BrokerFixture> {
     let binary = std::env::var_os("DEKOPON_TEST_BROKERD")?;
-    let wasm = std::env::var_os(if asset {
-        "DEKOPON_TEST_ASSET_WASM"
+    let wasm = if spawn {
+        None
     } else {
-        "DEKOPON_TEST_PROBE_WASM"
-    })?;
+        Some(std::env::var_os(if asset {
+            "DEKOPON_TEST_ASSET_WASM"
+        } else {
+            "DEKOPON_TEST_PROBE_WASM"
+        })?)
+    };
     let dir = tempfile::tempdir().expect("fixture directory");
     fs::set_permissions(
         dir.path(),
@@ -82,7 +92,14 @@ async fn broker_with_telemetry(
     .expect("directory mode");
     let socket = dir.path().join("broker.sock");
     let component = dir.path().join("probe.wasm");
-    write_private(&component, fs::read(wasm).expect("fixture component"));
+    write_private(
+        &component,
+        if let Some(wasm) = wasm {
+            fs::read(wasm).expect("fixture component")
+        } else {
+            fs::read(spawn_component::component().path()).expect("tag v0.33.0 spawn component")
+        },
+    );
     let policy = dir.path().join("policies.cedar");
     write_private(&policy, br#"
 @id("console-agent")
@@ -99,6 +116,12 @@ when { context.via == "dekopon-console" && context.agent == "reviewer" };
 permit(principal == Dekopon::Principal::"maintainer", action == Dekopon::Action::"http-probe.purge", resource == Dekopon::Provider::"http-probe")
 when { context.via == "dekopon-console" && context.agent == "reviewer" };
 "#);
+    if spawn {
+        use std::io::Write as _;
+        writeln!(fs::OpenOptions::new().append(true).open(&policy).unwrap(),
+            "@id(\"console-spawn\") permit(principal == Dekopon::Principal::\"maintainer\", action == Dekopon::Action::\"cli-probe.write\", resource == Dekopon::Provider::\"cli-probe\") when {{ context.via == \"dekopon-console\" && context.agent == \"reviewer\" }};"
+        ).unwrap();
+    }
     let config = dir.path().join("broker.yaml");
     let assets_root = dir
         .path()
@@ -124,11 +147,16 @@ when { context.via == "dekopon-console" && context.agent == "reviewer" };
     };
     let provider = if asset { "http-probe" } else { "cli-probe" };
     let constraints = if asset {
-        "{timeoutMs: 30000, maxOutputBytes: 65536, asset: {attach: true, send: true, remove: false}}"
+        "{timeoutMs: 30000, asset: {attach: true, send: true, remove: false}}"
     } else {
-        "{timeoutMs: 30000, maxOutputBytes: 65536}"
+        "{timeoutMs: 30000}"
     };
     let uid = rustix::process::geteuid().as_raw();
+    let spawn_capability = if spawn {
+        "      cli-probe.write:\n        constraints: {timeoutMs: 30000}\n"
+    } else {
+        ""
+    };
     write_private(
         &config,
         format!(
@@ -149,7 +177,7 @@ capabilities:
     capabilities:
       {capability}:
         constraints: {constraints}
-"#,
+{spawn_capability}"#,
             socket.display(),
             policy.display(),
             component.display(),
@@ -188,6 +216,52 @@ capabilities:
     panic!(
         "broker did not bind socket: {}",
         fs::read_to_string(dir.path().join("broker.log")).expect("broker log")
+    );
+}
+
+/// v0.33.0 core brokerd test fixture: its provider invokes spawn/run("printf child").
+/// Unlike the direct wire tests, this drives the console's own ShellRuntime and BrokerLeg.
+#[tokio::test]
+async fn console_shell_runs_provider_child_through_real_broker() {
+    let Some(binary) = std::env::var_os("DEKOPON_TEST_BROKERD") else {
+        eprintln!("broker fixture env absent; nested integration not exercised");
+        return;
+    };
+    assert!(
+        Path::new(&binary).is_file(),
+        "broker fixture executable missing"
+    );
+    let fixture = broker_with_telemetry(true, false, true, None)
+        .await
+        .expect("broker executable supplied");
+    let subject = "slack.t0123abc.u9xyz".parse().unwrap();
+    let mut options = ConsoleOptions::new(subject, "unused".into());
+    options.socket = Some(fixture.socket.clone());
+    options.server_uid = Some(rustix::process::geteuid().as_raw());
+    let (client, _) = connect(&options).await.expect("real broker connection");
+    let leg = open_agent(client, options.subject, "reviewer".parse().unwrap(), None)
+        .await
+        .expect("broker authorized the console");
+    let outcome = tokio::task::spawn_blocking(move || {
+        ShellRuntime {
+            invoker: LegHandle(Arc::new(leg)),
+            limits: Limits::default(),
+            calls: CallBudget::new(4),
+        }
+        .run_script("probe upper --text parent")
+    })
+    .await
+    .expect("console script task");
+    assert_eq!(
+        outcome.exit_code.get(),
+        0,
+        "nested script failed: {}",
+        outcome.output
+    );
+    assert!(
+        outcome.output.contains("child"),
+        "child output lost: {}",
+        outcome.output
     );
 }
 
@@ -301,7 +375,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
                 .parse::<SecretDrn>()
                 .unwrap(),
         };
-        let denied = recorded.invoke(CommandProposal::new("cli-probe.upper", json!({"text":"hi"}), Some(drn)), sink());
+        let denied = recorded.invoke(CommandProposal::new("cli-probe.upper", json!({"text":"hi"}), Some(drn)), sink(), &TreeContext::new(Limits::default(), CallBudget::new(4)));
         assert!(
             matches!(denied, CapabilityCallResult::Denied { .. }),
             "secret.use cannot be dropped by a wrapper: {denied:?}"
@@ -401,7 +475,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
 async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors() {
     // Run only with the separately supplied latest-main asset fixture; the published 0.19.0
     // probe broker test above does not imply support for unpublished broker model APIs.
-    let Some(fixture) = broker_with_telemetry(true, true, None).await else {
+    let Some(fixture) = broker_with_telemetry(true, true, false, None).await else {
         eprintln!("asset fixture env absent; integration not exercised");
         return;
     };
@@ -420,7 +494,7 @@ async fn executed_asset_effect_fails_console_delivery_and_releases_descriptors()
         let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
         let before = descriptors();
         for _ in 0..3 {
-            let outcome = invoker.invoke(CommandProposal::new("http-probe.purge", json!({"assetMode": "attach"}), None), sink());
+            let outcome = invoker.invoke(CommandProposal::new("http-probe.purge", json!({"assetMode": "attach"}), None), sink(), &TreeContext::new(Limits::default(), CallBudget::new(4)));
             assert!(matches!(outcome, CapabilityCallResult::Failed { ref error, .. } if error.contains("effect executed") && error.contains("do not repeat")), "asset was falsely delivered: {outcome:?}");
             assert_eq!(fs::read_dir(&assets_root).unwrap().count(), 0, "assets must be unlinked after output");
         }

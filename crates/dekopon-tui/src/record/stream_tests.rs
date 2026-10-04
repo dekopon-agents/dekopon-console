@@ -65,7 +65,12 @@ impl CapabilityInvoker for Probe {
             })),
         })
     }
-    fn invoke(&self, mut proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        mut proposal: CommandProposal,
+        streams: Streams,
+        _tree: &dekopon_shell::TreeContext,
+    ) -> CapabilityCallResult {
         self.effects.fetch_add(1, Ordering::SeqCst);
         assert!(proposal.secret_use.is_none());
         let command = proposal.input["command"].as_str().unwrap();

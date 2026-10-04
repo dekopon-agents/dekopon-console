@@ -359,7 +359,12 @@ impl CapabilityInvoker for NoDirect {
         None
     }
 
-    fn invoke(&self, proposal: CommandProposal, _streams: Streams) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        proposal: CommandProposal,
+        _streams: Streams,
+        _tree: &dekopon_shell::TreeContext,
+    ) -> CapabilityCallResult {
         if proposal.secret_use.is_some() {
             return dekopon_shell::secret_use_unsupported();
         }
@@ -688,8 +693,13 @@ impl CapabilityInvoker for LegHandle {
         self.0.script_finished();
     }
 
-    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
-        refuse_unpresented_assets(self.0.invoke(proposal, streams))
+    fn invoke(
+        &self,
+        proposal: CommandProposal,
+        streams: Streams,
+        tree: &dekopon_shell::TreeContext,
+    ) -> CapabilityCallResult {
+        refuse_unpresented_assets(self.0.invoke(proposal, streams, tree))
     }
 }
 
