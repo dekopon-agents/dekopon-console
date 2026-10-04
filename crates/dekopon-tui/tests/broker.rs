@@ -3,18 +3,18 @@
 
 #![cfg(unix)]
 
-use dekopon_agent::{ShellRuntime, prompt::ScriptRuntime as _};
+use dekopon_agent::{SessionInvoker, ShellRuntime, prompt::ScriptRuntime as _};
 use dekopon_broker_protocol::{BrokerClient, ChatScopeClaim, FrameLimits};
 use dekopon_core::{AgentId, ExternalSubject};
 use dekopon_core::{SecretDrn, SecretUseProposal};
 use dekopon_shell::{
-    CallBudget, CapabilityCallResult, CapabilityInvoker as _, CommandProposal, Interpreter, Limits,
-    Streams, TreeContext,
+    CallBudget, CapabilityCallResult, CapabilityInvoker, CommandProposal, CommandRun, Interpreter,
+    Limits, Streams, TreeContext,
 };
 use dekopon_tui::{
     App,
     record::{RecordingInvoker, Sequence, SessionEvent},
-    session::{AgentSession, ConsoleOptions, LegHandle, connect, open_agent},
+    session::{AgentSession, ConsoleOptions, LegHandle, NoDirect, connect, open_agent},
 };
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
@@ -505,12 +505,130 @@ async fn executed_asset_effect_registers_descriptor_through_real_broker() {
         "missing registration id: {note}"
     );
     assert!(note.contains("text/plain"), "missing media type: {note}");
-    assert!(note.contains("stored bytes"), "missing byte size: {note}");
+    assert!(note.contains("11 stored bytes"), "wrong byte size: {note}");
     assert!(!note.contains("no asset store"), "old refusal: {note}");
     assert_eq!(
         fs::read_dir(&assets_root).unwrap().count(),
         0,
         "broker assets must be unlinked after output"
+    );
+}
+
+// The verified http-probe Wasm exposes assetMode in its capability input schema but not in
+// its CLI argv parser. This test-only command-word parser supplies that *same* broker-granted
+// proposal to ShellRuntime; all effect execution, asset descriptors, registration and stderr
+// handling still run through the real broker and the console's LegHandle. It is not evidence
+// that an operator can type this command against the stock http-probe provider CLI.
+struct AssetFixtureCommand(LegHandle);
+
+impl CapabilityInvoker for AssetFixtureCommand {
+    fn granted(&self) -> Vec<String> {
+        self.0.granted()
+    }
+
+    fn command_words(&self) -> Vec<String> {
+        vec!["asset-fixture".into()]
+    }
+
+    fn run_command(&self, word: &str, argv: &[String], stdin_piped: bool) -> Option<CommandRun> {
+        if word != "asset-fixture" || !argv.is_empty() || stdin_piped {
+            return None;
+        }
+        Some(CommandRun::Proposed {
+            capability: "http-probe.purge".into(),
+            input: json!({"assetMode": "attach"}),
+            secret_use: None,
+            report: None,
+        })
+    }
+
+    fn invoke(
+        &self,
+        proposal: CommandProposal,
+        streams: Streams,
+        tree: &TreeContext,
+    ) -> CapabilityCallResult {
+        self.0.invoke(proposal, streams, tree)
+    }
+}
+
+#[tokio::test]
+async fn console_shell_and_model_script_register_real_broker_asset_with_zero_exit() {
+    let Some(fixture) = broker_with_telemetry(true, true, false, None).await else {
+        eprintln!("asset fixture env absent; shell and model-script integration not exercised");
+        return;
+    };
+    let subject = "slack.t0123abc.u9xyz".parse().unwrap();
+    let mut options = ConsoleOptions::new(subject, "unused".into());
+    options.socket = Some(fixture.socket.clone());
+    options.server_uid = Some(rustix::process::geteuid().as_raw());
+    let (client, _) = connect(&options).await.unwrap();
+    for model_script in [false, true] {
+        let leg = open_agent(
+            client.clone(),
+            options.subject.clone(),
+            "reviewer".parse().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        let output = tokio::task::spawn_blocking(move || {
+            let broker = AssetFixtureCommand(LegHandle(Arc::new(leg)));
+            if model_script {
+                // run_turn builds this SessionInvoker (NoDirect + LegHandle) for model scripts.
+                // The fixture parser wraps only the command-word step; invoke is unchanged.
+                ShellRuntime {
+                    invoker: SessionInvoker {
+                        direct: NoDirect,
+                        broker: Some(Box::new(broker)),
+                    },
+                    limits: Limits::default(),
+                    calls: CallBudget::new(4),
+                }
+                .run_script("asset-fixture")
+            } else {
+                ShellRuntime {
+                    invoker: broker,
+                    limits: Limits::default(),
+                    calls: CallBudget::new(4),
+                }
+                .run_script("asset-fixture")
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            output.exit_code.get(),
+            0,
+            "model_script={model_script}: {}",
+            output.output
+        );
+        assert!(
+            output.output.contains("chat-asset:1"),
+            "model_script={model_script}: {}",
+            output.output
+        );
+        assert!(
+            output.output.contains("text/plain"),
+            "model_script={model_script}: {}",
+            output.output
+        );
+        assert!(
+            output.output.contains("11 stored bytes"),
+            "model_script={model_script}: {}",
+            output.output
+        );
+        assert!(
+            !output.output.contains("no asset store"),
+            "model_script={model_script}: {}",
+            output.output
+        );
+    }
+    assert_eq!(
+        fs::read_dir(fixture._dir.path().join("assets"))
+            .unwrap()
+            .count(),
+        0
     );
 }
 
