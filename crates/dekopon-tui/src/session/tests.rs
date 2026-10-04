@@ -105,7 +105,11 @@ fn the_empty_local_leg_claims_nothing() {
     assert!(matches!(
         direct.invoke(
             dekopon_shell::CommandProposal::new("gh.issue.list", json!({}), None),
-            sink()
+            sink(),
+            &dekopon_shell::TreeContext::new(
+                dekopon_shell::Limits::default(),
+                dekopon_shell::CallBudget::new(4)
+            )
         ),
         dekopon_shell::CapabilityCallResult::NotFound
     ));
@@ -115,7 +119,11 @@ fn the_empty_local_leg_claims_nothing() {
     assert!(matches!(
         direct.invoke(
             dekopon_shell::CommandProposal::new("gh.issue.list", json!({}), Some(drn)),
-            sink()
+            sink(),
+            &dekopon_shell::TreeContext::new(
+                dekopon_shell::Limits::default(),
+                dekopon_shell::CallBudget::new(4)
+            )
         ),
         dekopon_shell::CapabilityCallResult::Denied { .. }
     ));

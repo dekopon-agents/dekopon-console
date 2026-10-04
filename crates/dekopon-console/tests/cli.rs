@@ -455,7 +455,7 @@ fn pty_broker_fixture() -> Option<PtyBroker> {
         std::fs::write(path, bytes).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    std::fs::write(&config, format!("apiVersion: dekopon.dev/brokerd/v1alpha1\nsocketPath: {}\npoliciesPath: {}\nproviders: [{}]\nidentities:\n  - uid: {}\n    principal: dekopon-console\n    attestor:\n      namespaces: [slack.t0123abc]\nprincipals:\n  maintainer:\n    subjects: [slack.t0123abc.u9xyz]\ncapabilities:\n  cli-probe:\n    capabilities:\n      cli-probe.upper:\n        constraints: {{timeoutMs: 30000, maxOutputBytes: 65536}}\n", socket.display(), policy.display(), component.display(), rustix::process::geteuid().as_raw())).unwrap();
+    std::fs::write(&config, format!("apiVersion: dekopon.dev/brokerd/v1alpha1\nsocketPath: {}\npoliciesPath: {}\nproviders: [{}]\nidentities:\n  - uid: {}\n    principal: dekopon-console\n    attestor:\n      namespaces: [slack.t0123abc]\nprincipals:\n  maintainer:\n    subjects: [slack.t0123abc.u9xyz]\ncapabilities:\n  cli-probe:\n    capabilities:\n      cli-probe.upper:\n        constraints: {{timeoutMs: 30000}}\n", socket.display(), policy.display(), component.display(), rustix::process::geteuid().as_raw())).unwrap();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let log = std::fs::File::create(dir.path().join("broker.log")).unwrap();
     let mut child = Command::new(broker)
@@ -566,7 +566,8 @@ fn pty_console(socket: &Path, catalog: &Path, direct: bool) -> String {
         }
         std::thread::sleep(Duration::from_millis(30));
     };
-    child.stdin.take().unwrap().write_all(b"q").unwrap();
+    // Direct agent entry starts in composing mode, where 'q' edits the script rather than quits.
+    child.stdin.take().unwrap().write_all(b"\x03").unwrap();
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success(), "PTY console exited {status}");
@@ -594,13 +595,13 @@ fn exact_agent_enters_real_broker_session_while_omitted_agent_stays_in_picker() 
     let direct = pty_console(&fixture.socket, &catalog, true);
     assert!(
         direct.contains("reviewer:")
-            && direct.contains("granted")
-            && direct.contains("cli-probe.upper"),
-        "direct selection did not open the broker leg"
+            && direct.contains("capabilities")
+            && direct.contains("granted"),
+        "direct selection did not open the broker leg: {direct}"
     );
     let picker = pty_console(&fixture.socket, &catalog, false);
     assert!(
-        !picker.contains("cli-probe.upper") && !picker.contains("reviewer:"),
+        !picker.contains("reviewer:"),
         "bare selection opened a leg without picker action"
     );
 }

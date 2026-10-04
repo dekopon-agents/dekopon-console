@@ -1,5 +1,10 @@
 # Console changelog
 
+## 0.6.0
+
+- Target published Dekopon 0.33.0 with exact core pins; pass the shell tree context through console broker invokers so broker child-script upcalls execute under the shared script budget.
+- Add an opt-in real-broker regression: a synthetic provider spawns `printf child`, forwards child stdout, and the console ShellRuntime asserts its output and zero exit status. Requires a verified 0.33.0 broker binary; it is not a production Python/gh-provider test.
+
 ## 0.5.0
 
 - Target published Dekopon 0.31.0 with exact crates.io pins for all ten authored core dependencies; CI enforces exact pins and rejects core git/path dependencies.

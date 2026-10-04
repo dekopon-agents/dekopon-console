@@ -185,7 +185,7 @@ async fn console_turn_exports_one_causal_trace_through_model_script_broker_and_p
         return;
     }
     let collector = Loopback::start();
-    let mut fixture = broker_with_telemetry(true, false, Some(&collector.endpoint))
+    let mut fixture = broker_with_telemetry(true, false, false, Some(&collector.endpoint))
         .await
         .unwrap();
     let settings = ExporterSettings::new(

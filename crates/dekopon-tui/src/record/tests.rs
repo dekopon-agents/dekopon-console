@@ -5,8 +5,8 @@ use dekopon_agent::{
     prompt::ScriptRuntime,
 };
 use dekopon_shell::{
-    CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandProposal, ExitCode,
-    ScriptOutcome, Streams,
+    CallBudget, CapabilityCallResult, CapabilityDescription, CapabilityInvoker, CommandProposal,
+    ExitCode, Limits, ScriptOutcome, Streams, TreeContext,
 };
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -35,7 +35,12 @@ impl CapabilityInvoker for FixedInvoker {
         })
     }
 
-    fn invoke(&self, proposal: CommandProposal, streams: Streams) -> CapabilityCallResult {
+    fn invoke(
+        &self,
+        proposal: CommandProposal,
+        streams: Streams,
+        _tree: &TreeContext,
+    ) -> CapabilityCallResult {
         match proposal.capability.as_str() {
             "gh.issue.list" => {
                 use std::io::Write as _;
@@ -66,10 +71,12 @@ impl ScriptRuntime for FixedRuntime<'_> {
         self.invoker.invoke(
             CommandProposal::new("gh.issue.list", json!({"state": "open"}), None),
             sink(),
+            &tree(),
         );
         self.invoker.invoke(
             CommandProposal::new("gh.pull-request.merge", json!({"number": 7}), None),
             sink(),
+            &tree(),
         );
         ScriptOutcome {
             output: "two calls\n".to_owned(),
@@ -83,6 +90,10 @@ impl ScriptRuntime for FixedRuntime<'_> {
     fn command_words(&self) -> Vec<String> {
         vec!["gh".to_owned()]
     }
+}
+
+fn tree() -> TreeContext {
+    TreeContext::new(Limits::default(), CallBudget::new(4))
 }
 
 fn sink() -> Streams {
@@ -194,7 +205,8 @@ fn a_closed_console_does_not_stop_a_session() {
     assert_eq!(
         CallOutcome::from(&invoker.invoke(
             CommandProposal::new("gh.issue.list", json!({}), None),
-            sink()
+            sink(),
+            &tree(),
         )),
         CallOutcome::Succeeded
     );
@@ -215,6 +227,7 @@ fn elapsed_is_measured_around_the_seam() {
     invoker.invoke(
         CommandProposal::new("gh.issue.list", json!({}), None),
         sink(),
+        &tree(),
     );
 
     let events = drain(&mut receiver);

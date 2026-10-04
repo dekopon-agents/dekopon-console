@@ -125,7 +125,7 @@ async fn console_forwards_attestation_secret_intent_and_descriptors_not_inline_s
         writer.write_all(b"hello from stdin\n").unwrap();
         drop(writer);
         let (stdout, mut reader) = UnixStream::pair().unwrap();
-        let result = invoker.invoke(CommandProposal { capability, input, secret_use, report }, Streams { stdin: Some(stdin.into()), stdout: stdout.into() });
+        let result = invoker.invoke(CommandProposal { capability, input, secret_use, report }, Streams { stdin: Some(stdin.into()), stdout: stdout.into() }, &dekopon_shell::TreeContext::new(dekopon_shell::Limits::default(), dekopon_shell::CallBudget::new(4)));
         assert!(matches!(result, CapabilityCallResult::Exited { status, ref stderr } if status.get() == 141 && stderr.is_empty()));
         let mut output = String::new();
         reader.read_to_string(&mut output).unwrap();
