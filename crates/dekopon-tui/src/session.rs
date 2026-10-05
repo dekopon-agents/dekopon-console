@@ -87,7 +87,7 @@ pub enum SessionError {
     Leg(#[from] BrokerLegError),
     /// Resolution landed on the credential file another surface owns.
     #[error(
-        "refusing to use {path}: that is the credential file `dekopond` and `dekopon auth chatgpt` \
+        "refusing to use {path}: that is the credential file `dekopon-gatewayd` and `dekopon auth chatgpt` \
          resolve to, and the refresh token rotates, so sharing it would invalidate theirs. Run \
          `dekopon auth chatgpt login --auth-file <PATH>` for a console credential, or pass \
          --auth-file to accept this one deliberately"

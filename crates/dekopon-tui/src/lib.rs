@@ -3,7 +3,7 @@
 //! The console is the gateway half of a development deployment, and nothing more privileged than
 //! that. `dekopon-brokerd` holds the policy, the provider credentials, and the components; it has
 //! no model client and no concept of a turn, so something has to run the loop. In production that
-//! is `dekopond`, woken by a chat transport. Here it is this crate, woken by somebody typing.
+//! is `dekopon-gatewayd`, woken by a chat transport. Here it is this crate, woken by somebody typing.
 //!
 //! The local transcript records tool arguments/results for interactive inspection. Shared core
 //! telemetry separately exports complete prompt/script/provider payloads under one turn trace
