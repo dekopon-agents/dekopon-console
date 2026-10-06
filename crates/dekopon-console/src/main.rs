@@ -71,6 +71,10 @@ struct Cli {
     #[arg(long, value_name = "AGENT")]
     agent: Option<AgentId>,
 
+    /// Use broker-derived synthetic scope; never replay a real conversation.
+    #[arg(long)]
+    smoke_conversation: bool,
+
     /// Operator-authored, read-only profile document.
     #[arg(long, value_name = "PATH")]
     profiles: Option<PathBuf>,
@@ -96,7 +100,7 @@ struct Cli {
     ///
     /// Settings that read the environment are not in this list: a container sets them once for
     /// `kubectl exec` sessions, and PID1 inherits the same environment.
-    #[arg(long, conflicts_with_all = ["config", "socket", "agent", "profile", "profiles", "model", "endpoint", "api_key_env", "auth_file", "max_steps", "max_capability_calls"])]
+    #[arg(long, conflicts_with_all = ["config", "socket", "agent", "profile", "profiles", "model", "endpoint", "api_key_env", "auth_file", "max_steps", "max_capability_calls", "smoke_conversation"])]
     idle: bool,
 
     /// ChatGPT credential file.
@@ -269,7 +273,12 @@ fn execute(cli: &Cli, runtime: &tokio::runtime::Runtime) -> Result<(), ConsoleEr
     );
     let mut options = ConsoleOptions::new(subject.clone(), model);
     options.model_source = model_source;
-    options.scope = initial.and_then(|p| p.scope.clone());
+    options.scope = if cli.smoke_conversation {
+        Some(dekopon_tui::session::smoke_claim())
+    } else {
+        initial.and_then(|p| p.scope.clone())
+    };
+    options.smoke_conversation = cli.smoke_conversation;
     options.profiles = document.profiles.clone();
     options.skills = catalog
         .agents()

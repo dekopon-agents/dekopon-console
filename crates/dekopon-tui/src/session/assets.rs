@@ -1,22 +1,125 @@
-//! Ephemeral, bounded intake of broker-returned descriptors. Nothing is delivered or persisted.
-use std::{collections::BTreeMap, fs::File, io::Read, os::fd::OwnedFd, sync::Mutex};
+//! Agent-entry-local inventory shared by returned and manually attached assets.
+use std::{collections::BTreeMap, os::fd::OwnedFd};
 
-use dekopon_agent::attachment::{GeneratedAssetStore, GeneratedImage};
-use dekopon_broker_protocol::NewAsset;
-use dekopon_model::asset::BlobError;
+use dekopon_agent::attachment::{
+    ChatAssetRefusal, ChatAssetSource, GeneratedAssetStore, GeneratedImage,
+};
+use dekopon_broker_protocol::{AssetEncoding, AssetRow, NewAsset};
+use dekopon_core::base64::{Engine as _, STANDARD};
+use dekopon_model::asset::{BlobError, DiskBlob};
+use parking_lot::Mutex;
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 16;
+const MAX_ENCODED: usize = 1024 * 1024;
+const MAX_DECODED: usize = 512 * 1024;
 
 #[derive(Default)]
-pub(super) struct ConsoleAssets(Mutex<Inventory>);
+pub struct ConsoleAssets(Mutex<Inventory>);
 
 #[derive(Default)]
 struct Inventory {
     next_id: u64,
     bytes: usize,
-    // Retained only for the lifetime of the agent leg. Do not expose a delivery API.
-    items: BTreeMap<u64, Vec<u8>>,
+    items: BTreeMap<u64, (AssetRow, DiskBlob)>,
+}
+
+impl ConsoleAssets {
+    fn insert(
+        &self,
+        blob: DiskBlob,
+        content_type: String,
+        encoding: AssetEncoding,
+        origin: String,
+    ) -> Result<u64, BlobError> {
+        let len = blob.len();
+        let mut inventory = self.0.lock();
+        if inventory.items.len() >= MAX_ITEMS
+            || len > MAX_BYTES
+            || inventory.bytes > MAX_BYTES - len
+        {
+            return Err(BlobError::Capacity);
+        }
+        let id = inventory
+            .next_id
+            .checked_add(1)
+            .ok_or(BlobError::Capacity)?;
+        inventory.next_id = id;
+        inventory.bytes += len;
+        inventory.items.insert(
+            id,
+            (
+                AssetRow {
+                    id,
+                    content_type,
+                    encoding,
+                    bytes: Some(len as u64),
+                    origin,
+                    sent: false,
+                },
+                blob,
+            ),
+        );
+        Ok(id)
+    }
+
+    /// Decode only an operator-entered, bounded standard-base64 literal; never store encoded text.
+    pub fn attach_base64(&self, mime: &str, encoded: &str) -> Result<u64, String> {
+        let valid_mime = mime.len() <= 127
+            && !mime.is_empty()
+            && mime.is_ascii()
+            && mime.split_once('/').is_some_and(|(kind, subtype)| {
+                !kind.is_empty()
+                    && !subtype.is_empty()
+                    && kind.bytes().chain(subtype.bytes()).all(|b| {
+                        b.is_ascii_alphanumeric()
+                            || matches!(
+                                b,
+                                b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                            )
+                    })
+            });
+        if !valid_mime {
+            return Err("invalid MIME type".into());
+        }
+        if encoded.len() > MAX_ENCODED {
+            return Err("encoded asset exceeds 1 MiB".into());
+        }
+        let bytes = STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("invalid standard base64: {error}"))?;
+        if bytes.len() > MAX_DECODED {
+            return Err("decoded asset exceeds 512 KiB".into());
+        }
+        let blob = DiskBlob::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        self.insert(
+            blob,
+            mime.to_owned(),
+            AssetEncoding::Identity,
+            "console".into(),
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+impl ChatAssetSource for ConsoleAssets {
+    fn fetch_for_capability(&self, id: u64) -> Result<(String, DiskBlob), ChatAssetRefusal> {
+        let inventory = self.0.lock();
+        let (row, blob) = inventory
+            .items
+            .get(&id)
+            .ok_or(ChatAssetRefusal::UnknownAsset)?;
+        Ok((row.content_type.clone(), blob.clone()))
+    }
+
+    fn rows(&self) -> Vec<AssetRow> {
+        self.0
+            .lock()
+            .items
+            .values()
+            .map(|(row, _)| row.clone())
+            .collect()
+    }
 }
 
 impl GeneratedAssetStore for ConsoleAssets {
@@ -30,37 +133,27 @@ impl GeneratedAssetStore for ConsoleAssets {
         if metadata.bytes > MAX_BYTES as u64 {
             return Err(BlobError::TooLarge);
         }
-        let len = metadata.bytes as usize; // bounded above by 64 MiB
-        let mut inventory = self.0.lock().expect("console asset inventory poisoned");
-        if inventory.items.len() >= MAX_ITEMS || inventory.bytes > MAX_BYTES - len {
-            return Err(BlobError::Capacity);
-        }
-        let mut data = Vec::with_capacity(len.min(1024 * 1024));
-        File::from(descriptor)
-            .take((len as u64) + 1)
-            .read_to_end(&mut data)?;
-        if data.len() != len {
-            return Err(BlobError::LengthChanged);
-        }
-        let id = inventory
-            .next_id
-            .checked_add(1)
-            .ok_or(BlobError::Capacity)?;
-        inventory.next_id = id;
-        inventory.bytes += len;
-        inventory.items.insert(id, data);
-        Ok(id)
+        let blob = DiskBlob::from_descriptor(descriptor, metadata.bytes as usize)?;
+        self.insert(
+            blob,
+            metadata.content_type.clone(),
+            metadata.encoding,
+            "provider".into(),
+        )
     }
 
     fn remove(&self, id: u64) -> Result<(), BlobError> {
-        let mut inventory = self.0.lock().expect("console asset inventory poisoned");
-        let data = inventory.items.remove(&id).ok_or(BlobError::Unknown)?;
-        inventory.bytes -= data.len();
+        let mut inventory = self.0.lock();
+        let (_, blob) = inventory.items.get(&id).ok_or(BlobError::Unknown)?;
+        if blob.is_pinned() {
+            return Err(BlobError::Capacity);
+        }
+        let (_, blob) = inventory.items.remove(&id).ok_or(BlobError::Unknown)?;
+        inventory.bytes -= blob.len();
         Ok(())
     }
 
     fn send(&self, _id: u64) -> Result<Option<GeneratedImage>, BlobError> {
-        // The console has no transport to send to. Never claim delivery.
         Err(BlobError::Disabled)
     }
 
@@ -70,42 +163,117 @@ impl GeneratedAssetStore for ConsoleAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dekopon_broker_protocol::AssetEncoding;
+    use dekopon_agent::attachment::ChatAssetInputs;
+    use serde_json::json;
+    use std::io::Write as _;
 
     #[test]
-    fn bounds_and_removal() {
-        let store = ConsoleAssets::default();
-        let descriptor = || {
-            let mut file = tempfile::tempfile().unwrap();
-            std::io::Write::write_all(&mut file, b"test").unwrap();
-            std::io::Seek::rewind(&mut file).unwrap();
-            file.into()
-        };
-        let metadata = NewAsset {
-            descriptor: 0,
-            content_type: "text/plain".into(),
-            encoding: AssetEncoding::Identity,
-            bytes: 4,
-            sha256: String::new(),
-        };
-        let id = store
-            .register(descriptor(), &metadata, "test", "one")
+    fn returned_local_removed_and_reentered() {
+        let store = std::sync::Arc::new(ConsoleAssets::default());
+        let local = store.attach_base64("image/heic", "AAEC/w==").unwrap();
+        let (mime, blob) = store.fetch_for_capability(local).unwrap();
+        assert_eq!(mime, "image/heic");
+        assert_eq!(blob.read().unwrap(), [0, 1, 2, 255]);
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"returned").unwrap();
+        let returned = store
+            .register(
+                file.into(),
+                &NewAsset {
+                    descriptor: 0,
+                    content_type: "image/png".into(),
+                    encoding: AssetEncoding::Identity,
+                    bytes: 8,
+                    sha256: String::new(),
+                },
+                "x",
+                "y",
+            )
             .unwrap();
-        assert_eq!(id, 1);
-        store.remove(id).unwrap();
-        assert_eq!(store.0.lock().unwrap().bytes, 0);
-        let mut oversized = metadata.clone();
-        oversized.bytes = MAX_BYTES as u64 + 1;
         assert_eq!(
-            store.register(descriptor(), &oversized, "test", "two"),
-            Err(BlobError::TooLarge)
+            store
+                .fetch_for_capability(returned)
+                .unwrap()
+                .1
+                .read()
+                .unwrap(),
+            b"returned"
         );
-        let mut incorrect = metadata;
-        incorrect.bytes = 3;
+        let inputs = ChatAssetInputs::new(store.clone());
+        let (prepared, pins) = inputs.prepare(&json!({"file": "chat-asset:2"}), 0).unwrap();
+        assert_eq!(prepared.descriptors.len(), 1);
+        assert_eq!(pins[0].read().unwrap(), b"returned");
+        use std::os::unix::fs::FileExt as _;
+        let mut descriptor_bytes = vec![0; 8];
+        std::fs::File::from(prepared.descriptors[0].try_clone().unwrap())
+            .read_exact_at(&mut descriptor_bytes, 0)
+            .unwrap();
+        assert_eq!(descriptor_bytes, b"returned");
+        drop(pins);
+        drop(prepared);
+        assert_eq!(store.rows().len(), 2);
+        assert_eq!(store.rows()[0].encoding, AssetEncoding::Identity);
+        assert_eq!(store.rows()[0].content_type, "image/heic");
+        assert_eq!(store.rows()[1].content_type, "image/png");
+        drop(blob);
+        store.remove(local).unwrap();
+        assert!(matches!(
+            inputs.prepare(&json!({"file": "chat-asset:1"}), 0),
+            Err(ChatAssetRefusal::UnknownAsset)
+        ));
+        assert!(matches!(
+            store.fetch_for_capability(local),
+            Err(ChatAssetRefusal::UnknownAsset)
+        ));
+        let next_entry = ConsoleAssets::default();
+        assert!(matches!(
+            next_entry.fetch_for_capability(returned),
+            Err(ChatAssetRefusal::UnknownAsset)
+        ));
         assert_eq!(
-            store.register(descriptor(), &incorrect, "test", "three"),
-            Err(BlobError::LengthChanged)
+            next_entry.attach_base64("image/heic", "AAEC/w==").unwrap(),
+            1
         );
-        assert_eq!(store.0.lock().unwrap().items.len(), 0);
+        let other_agent = ConsoleAssets::default();
+        assert_eq!(
+            other_agent.attach_base64("text/plain", "b3RoZXI=").unwrap(),
+            1
+        );
+        assert_eq!(
+            other_agent
+                .fetch_for_capability(1)
+                .unwrap()
+                .1
+                .read()
+                .unwrap(),
+            b"other"
+        );
+        assert!(matches!(
+            other_agent.fetch_for_capability(returned),
+            Err(ChatAssetRefusal::UnknownAsset)
+        ));
+    }
+
+    #[test]
+    fn base64_bounds_and_malformed() {
+        let store = ConsoleAssets::default();
+        for (mime, data) in [
+            ("image/heic", "%%%"),
+            ("not mime", "AA=="),
+            ("image/heic", "AA=!"),
+        ] {
+            assert!(store.attach_base64(mime, data).is_err());
+        }
+        assert!(
+            store
+                .attach_base64("image/heic", &"A".repeat(MAX_ENCODED + 1))
+                .is_err()
+        );
+        assert!(
+            store
+                .attach_base64("image/heic", &"A".repeat(699_052))
+                .is_err()
+        );
+        assert!(store.rows().is_empty());
     }
 }
