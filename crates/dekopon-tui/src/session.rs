@@ -26,7 +26,7 @@ use dekopon_agent::{
 use dekopon_broker_protocol::{
     Attestation, BrokerClient, BrokerSocketDiscovery, ChatScopeClaim, ChatTransportKind,
     ClientError, Conversation, ConversationKind, DeliveredAnswer, DeliveredTurnRequest,
-    DeliveryIdentity, FrameLimits, ResolvedBrokerSocket, Trigger,
+    DeliveryIdentity, FrameLimits, InvocationOutcome, ResolvedBrokerSocket, Trigger,
 };
 use dekopon_config::Skill;
 use dekopon_core::{AgentId, ExternalSubject};
@@ -332,7 +332,7 @@ pub async fn smoke_record(
     subject: ExternalSubject,
     agent: AgentId,
     text: String,
-) -> Result<String, ClientError> {
+) -> Result<(String, bool), ClientError> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let turn = DeliveredTurnRequest::new(
@@ -355,10 +355,10 @@ pub async fn smoke_record(
     let attestation =
         Attestation::for_chat(subject, agent, smoke_claim()).bound_to(turn.id.clone());
     let result = client.record_delivered_turn(attestation, turn).await?;
-    Ok(format!(
-        "{:?}: {}",
-        result.outcome,
-        result.error.unwrap_or_default()
+    let succeeded = result.outcome == InvocationOutcome::Succeeded;
+    Ok((
+        format!("{:?}: {}", result.outcome, result.error.unwrap_or_default()),
+        succeeded,
     ))
 }
 

@@ -688,14 +688,18 @@ async fn dispatch_in_context(
                     Err("smoke text exceeds 64 KiB".into())
                 };
                 let output = match &result {
-                    Ok(message) => message.clone(),
+                    Ok((message, _)) => message.clone(),
                     Err(error) => format!("refused: {error}"),
                 };
                 app.start_shell(line.clone());
                 app.finish_shell(ShellEntry {
                     input: line,
                     output,
-                    exit_code: Some(if result.is_ok() { 0 } else { 1 }),
+                    exit_code: Some(if result.as_ref().is_ok_and(|(_, succeeded)| *succeeded) {
+                        0
+                    } else {
+                        1
+                    }),
                     truncated: false,
                 });
                 app.busy = false;
