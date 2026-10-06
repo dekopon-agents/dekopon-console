@@ -26,7 +26,7 @@ use dekopon_agent::{
 use dekopon_broker_protocol::{
     Attestation, BrokerClient, BrokerSocketDiscovery, ChatScopeClaim, ChatTransportKind,
     ClientError, Conversation, ConversationKind, DeliveredAnswer, DeliveredTurnRequest,
-    DeliveryIdentity, FrameLimits, InvocationOutcome, ResolvedBrokerSocket, Trigger,
+    DeliveryIdentity, FrameLimits, InvocationOutcome, ResolvedBrokerSocket, TraceParent, Trigger,
 };
 use dekopon_config::Skill;
 use dekopon_core::{AgentId, ExternalSubject};
@@ -326,6 +326,39 @@ pub fn smoke_claim() -> ChatScopeClaim {
     }
 }
 
+struct SmokeIdentity {
+    boot_nonce: String,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl SmokeIdentity {
+    fn new(seed: [u8; 16]) -> Self {
+        Self {
+            boot_nonce: seed.iter().map(|byte| format!("{byte:02x}")).collect(),
+            next: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    fn turn(&self, parent: TraceParent, text: String) -> DeliveredTurnRequest {
+        let sequence = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        DeliveredTurnRequest::new(
+            format!("console-smoke-{}-{sequence}", self.boot_nonce)
+                .parse()
+                .unwrap_or_else(|_| unreachable!()),
+            parent,
+            DeliveryIdentity::Local {
+                transport: "console-smoke".parse().unwrap_or_else(|_| unreachable!()),
+                conversation: smoke_claim().conversation.key(),
+                boot_nonce: self.boot_nonce.clone(),
+                connection: 1,
+                sequence,
+            },
+            text,
+            DeliveredAnswer::accepted_by_transport("Recorded from console smoke".into()),
+        )
+    }
+}
+
 /// Record one synthetic delivered turn; only called after the local CLI gate.
 pub async fn smoke_record(
     client: &BrokerClient,
@@ -333,25 +366,10 @@ pub async fn smoke_record(
     agent: AgentId,
     text: String,
 ) -> Result<(String, bool), ClientError> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let turn = DeliveredTurnRequest::new(
-        format!("console-smoke-{sequence}")
-            .parse()
-            .unwrap_or_else(|_| unreachable!()),
-        "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-            .parse()
-            .unwrap_or_else(|_| unreachable!()),
-        DeliveryIdentity::Local {
-            transport: "console-smoke".parse().unwrap_or_else(|_| unreachable!()),
-            conversation: smoke_claim().conversation.key(),
-            boot_nonce: "0123456789abcdef0123456789abcdef".into(),
-            connection: 1,
-            sequence,
-        },
-        text,
-        DeliveredAnswer::accepted_by_transport("Recorded from console smoke".into()),
-    );
+    static IDENTITY: std::sync::OnceLock<SmokeIdentity> = std::sync::OnceLock::new();
+    let parent = dekopon_agent::session_trace_parent();
+    let identity = IDENTITY.get_or_init(|| SmokeIdentity::new(parent.trace_id()));
+    let turn = identity.turn(parent, text);
     let attestation =
         Attestation::for_chat(subject, agent, smoke_claim()).bound_to(turn.id.clone());
     let result = client.record_delivered_turn(attestation, turn).await?;

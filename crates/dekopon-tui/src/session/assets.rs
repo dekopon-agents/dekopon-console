@@ -1,4 +1,3 @@
-//! Agent-entry-local inventory shared by returned and manually attached assets.
 use std::{collections::BTreeMap, os::fd::OwnedFd};
 
 use dekopon_agent::attachment::{
