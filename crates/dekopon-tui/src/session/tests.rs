@@ -7,8 +7,20 @@ use serde_json::json;
 
 use super::{
     CONSOLE_AUTH_FILE_NAME, NoDirect, SessionError, StopFlag, guard_shared_credential,
-    resolve_console_credential,
+    resolve_console_credential, smoke_claim,
 };
+
+#[test]
+fn smoke_claim_is_exact_reserved_literal() {
+    assert_eq!(
+        serde_json::to_value(smoke_claim()).unwrap(),
+        json!({
+            "transport": "console-smoke", "kind": "local",
+            "conversation": { "kind": "directMessage", "id": "console-smoke" },
+            "trigger": "message"
+        })
+    );
+}
 
 #[test]
 fn an_explicit_path_is_honoured_wherever_it_points() {

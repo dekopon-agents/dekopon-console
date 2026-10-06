@@ -215,6 +215,8 @@ pub struct App {
     pub model_source: crate::session::ModelSource,
     /// Current broker leg's W3C trace ID; turn legs adopt the console turn span.
     pub broker_trace: Option<String>,
+    /// Volatile inventory owned by this selected agent entry.
+    pub assets: Option<std::sync::Arc<crate::session::assets::ConsoleAssets>>,
     /// One-use acknowledgement of the requested-scope warning.
     pub scope_warning_confirmed: bool,
     /// The most recent failure, in full; `e` reopens it.
@@ -257,6 +259,7 @@ impl App {
             model: String::new(),
             model_source: crate::session::ModelSource::Default,
             broker_trace: None,
+            assets: None,
             scope_warning_confirmed: false,
             last_error: None,
             error_scroll: 0,

@@ -34,8 +34,8 @@ use crate::{
     record::{RecordingProgress, SessionEvent},
     report::ErrorReport,
     session::{
-        AgentSession, ConsoleOptions, LegHandle, SessionError, StopFlag, build_model, open_agent,
-        session_channel,
+        AgentSession, ConsoleOptions, LegHandle, SessionError, StopFlag, build_model,
+        open_agent_with_assets, session_channel,
     },
     ui,
 };
@@ -439,6 +439,7 @@ mod tests;
 
 fn clear_agent_context(app: &mut App, history: &mut History, limits: HistoryLimits) {
     app.session = None;
+    app.assets = None;
     app.broker_trace = None;
     app.transcript = Default::default();
     app.shell_history.clear();
@@ -540,6 +541,9 @@ async fn dispatch_in_context(
                 )));
                 return;
             }
+            if options.smoke_conversation {
+                options.scope = Some(crate::session::smoke_claim());
+            }
             // A hop (including a refused hop or pending scope warning) must never leave
             // the prior agent usable under the newly selected subject/model.
             clear_agent_context(app, history, options.history_limits);
@@ -556,11 +560,13 @@ async fn dispatch_in_context(
                 return;
             }
             app.scope_warning_confirmed = false;
-            match open_agent(
+            let assets = Arc::new(crate::session::assets::ConsoleAssets::default());
+            match open_agent_with_assets(
                 client.clone(),
                 options.subject.clone(),
                 agent.clone(),
                 options.scope.clone(),
+                assets.clone(),
             )
             .await
             {
@@ -570,6 +576,7 @@ async fn dispatch_in_context(
                 }
                 Ok(leg) => {
                     app.enter(AgentSession::new(agent, leg, options.history_limits));
+                    app.assets = Some(assets);
                 }
                 Err(error) => {
                     let report = session_refusal(app, "open broker session", &error);
@@ -581,11 +588,15 @@ async fn dispatch_in_context(
             let Some(session) = app.session.as_ref() else {
                 return;
             };
-            let leg = match open_agent(
+            let Some(assets) = app.assets.clone() else {
+                return;
+            };
+            let leg = match open_agent_with_assets(
                 client.clone(),
                 options.subject.clone(),
                 session.agent.clone(),
                 options.scope.clone(),
+                assets,
             )
             .await
             {
@@ -653,12 +664,89 @@ async fn dispatch_in_context(
                 return;
             }
             let agent = session.agent.clone();
+            if let Some(text) = line.strip_prefix(":smoke record ") {
+                if !options.smoke_conversation {
+                    app.notice = Some(Notice::refusal(
+                        "restart with --smoke-conversation to record a synthetic turn",
+                    ));
+                    return;
+                }
+                let Some(text) = text.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else {
+                    app.notice = Some(Notice::refusal("use :smoke record '<text>'"));
+                    return;
+                };
+                let result = if text.len() <= 64 * 1024 {
+                    crate::session::smoke_record(
+                        client,
+                        options.subject.clone(),
+                        agent,
+                        text.to_owned(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err("smoke text exceeds 64 KiB".into())
+                };
+                let output = match &result {
+                    Ok(message) => message.clone(),
+                    Err(error) => format!("refused: {error}"),
+                };
+                app.start_shell(line.clone());
+                app.finish_shell(ShellEntry {
+                    input: line,
+                    output,
+                    exit_code: Some(if result.is_ok() { 0 } else { 1 }),
+                    truncated: false,
+                });
+                app.busy = false;
+                return;
+            }
+            if line.starts_with(":smoke") {
+                app.notice = Some(Notice::refusal(
+                    "unknown local smoke command; use :smoke record '<text>'",
+                ));
+                return;
+            }
+            if let Some(command) = line.strip_prefix(":asset ") {
+                let Some(assets) = app.assets.as_ref() else {
+                    return;
+                };
+                let result = command
+                    .strip_prefix("attach-base64 --type ")
+                    .and_then(|args| args.split_once(' '))
+                    .ok_or_else(|| "use :asset attach-base64 --type <mime> <BASE64>".to_owned())
+                    .and_then(|(mime, encoded)| assets.attach_base64(mime, encoded));
+                let output = match &result {
+                    Ok(id) => format!("chat-asset:{id}"),
+                    Err(error) => format!("refused: {error}"),
+                };
+                let label = ":asset attach-base64 [input redacted]".to_owned();
+                app.start_shell(label.clone());
+                app.finish_shell(ShellEntry {
+                    input: label,
+                    output,
+                    exit_code: Some(if result.is_ok() { 0 } else { 1 }),
+                    truncated: false,
+                });
+                app.busy = false;
+                return;
+            }
+            if line.starts_with(":asset") {
+                app.notice = Some(Notice::refusal(
+                    "unknown local asset command; use :asset attach-base64 --type <mime> <BASE64>",
+                ));
+                return;
+            }
             app.start_shell(line.clone());
-            let leg = match open_agent(
+            let Some(assets) = app.assets.clone() else {
+                return;
+            };
+            let leg = match open_agent_with_assets(
                 client.clone(),
                 options.subject.clone(),
                 agent,
                 options.scope.clone(),
+                assets,
             )
             .await
             {

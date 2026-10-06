@@ -28,6 +28,7 @@ dekopon-process.workspace = true
 dekopon-shell.workspace = true
 futures-util.workspace = true
 ratatui.workspace = true
+parking_lot.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
 serde.workspace = true

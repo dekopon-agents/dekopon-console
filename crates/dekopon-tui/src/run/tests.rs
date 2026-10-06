@@ -918,6 +918,91 @@ async fn an_empty_surface_says_what_the_broker_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn smoke_record_uses_existing_frame_and_binds_invocation() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.path().join("b.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let client = BrokerClient::new(
+        &path,
+        rustix::process::geteuid().as_raw(),
+        FrameLimits::default(),
+    )
+    .unwrap();
+    let response = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = dekopon_broker_protocol::DescriptorStream::new(stream);
+        let (request, _) = stream
+            .read_frame::<Value>(FrameLimits::default())
+            .await
+            .unwrap();
+        stream
+            .write_frame(&refusal_frame(), &[], FrameLimits::default())
+            .await
+            .unwrap();
+        request
+    });
+    let result = crate::session::smoke_record(
+        &client,
+        "slack.t0123abc.u9xyz".parse().unwrap(),
+        "ville-github".parse().unwrap(),
+        "marker".into(),
+    )
+    .await;
+    assert!(result.is_err());
+    let request = response.await.unwrap();
+    let wire = request["request"].to_string();
+    assert!(wire.contains("recordDeliveredTurn"), "{wire}");
+    assert!(wire.contains("console-smoke"), "{wire}");
+    assert!(wire.contains("marker"), "{wire}");
+    assert_eq!(
+        request["request"]["attestation"]["invocation"],
+        request["request"]["turn"]["id"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_record_without_flag_is_local_refusal() {
+    let (_directory, client) = fake_broker(vec![empty_surface_frame()]);
+    let mut app = console();
+    let leg = crate::session::open_agent(
+        client.clone(),
+        app.subject.parse().unwrap(),
+        "ville-github".parse().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    app.enter(crate::session::AgentSession::new(
+        "ville-github".parse().unwrap(),
+        leg,
+        dekopon_agent::prompt::HistoryLimits::default(),
+    ));
+    let mut options = ConsoleOptions::new(app.subject.parse().unwrap(), "test-model".into());
+    let mut history = History::new(options.history_limits);
+    dispatch(
+        &mut app,
+        Action::Shell(":smoke record 'marker'".into()),
+        &client,
+        &mut options,
+        &mut None,
+        &mut history,
+        &StopFlag::default(),
+    )
+    .await;
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("--smoke-conversation")
+    );
+    assert!(app.shell_history.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_refused_shell_command_is_written_in_full_into_the_transcript() {
     let (_directory, client) = fake_broker(vec![empty_surface_frame(), refusal_frame()]);
     let mut app = console();
@@ -933,6 +1018,9 @@ async fn a_refused_shell_command_is_written_in_full_into_the_transcript() {
         "ville-github".parse().unwrap(),
         leg,
         dekopon_agent::prompt::HistoryLimits::default(),
+    ));
+    app.assets = Some(std::sync::Arc::new(
+        crate::session::assets::ConsoleAssets::default(),
     ));
     let mut options = ConsoleOptions::new(app.subject.parse().unwrap(), "test-model".into());
     let mut history = History::new(options.history_limits);

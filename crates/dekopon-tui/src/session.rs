@@ -14,7 +14,7 @@ use std::{
 
 use dekopon_agent::{
     BrokerLeg, BrokerLegError, SessionInvoker, ShellRuntime,
-    attachment::ReplyAttachments,
+    attachment::{ChatAssetInputs, ReplyAttachments},
     meta::{
         AgentConfigView, EffectiveCapabilityView, MemoryConfigView, SessionConfigView, SkillView,
     },
@@ -24,8 +24,9 @@ use dekopon_agent::{
     },
 };
 use dekopon_broker_protocol::{
-    Attestation, BrokerClient, BrokerSocketDiscovery, ChatScopeClaim, ClientError, FrameLimits,
-    ResolvedBrokerSocket,
+    Attestation, BrokerClient, BrokerSocketDiscovery, ChatScopeClaim, ChatTransportKind,
+    ClientError, Conversation, ConversationKind, DeliveredAnswer, DeliveredTurnRequest,
+    DeliveryIdentity, FrameLimits, ResolvedBrokerSocket, Trigger,
 };
 use dekopon_config::Skill;
 use dekopon_core::{AgentId, ExternalSubject};
@@ -175,6 +176,8 @@ pub struct ConsoleOptions {
     pub subject: ExternalSubject,
     /// Authored route scope, never inferred from the agent or the terminal.
     pub scope: Option<ChatScopeClaim>,
+    /// Opt in to the broker-derived synthetic conversation (never real chat replay).
+    pub smoke_conversation: bool,
     /// Validated operator contexts used when switching agents.
     pub profiles: Vec<OperatorProfile>,
     /// Already validated and bounded mounted skills for each agent.
@@ -214,6 +217,7 @@ impl ConsoleOptions {
             frame_limits: FrameLimits::default(),
             subject,
             scope: None,
+            smoke_conversation: false,
             profiles: Vec::new(),
             skills: HashMap::new(),
             fixed_profile: None,
@@ -306,6 +310,58 @@ pub async fn connect(
     Ok((client, socket))
 }
 
+/// The sole reserved claim; the broker replaces its conversation ID with a boot-scoped digest.
+#[must_use]
+pub fn smoke_claim() -> ChatScopeClaim {
+    ChatScopeClaim {
+        transport: "console-smoke".parse().unwrap_or_else(|_| unreachable!()),
+        kind: ChatTransportKind::Local,
+        conversation: Conversation {
+            kind: ConversationKind::DirectMessage,
+            container: None,
+            id: "console-smoke".into(),
+            thread: None,
+        },
+        trigger: Trigger::Message,
+    }
+}
+
+/// Record one synthetic delivered turn; only called after the local CLI gate.
+pub async fn smoke_record(
+    client: &BrokerClient,
+    subject: ExternalSubject,
+    agent: AgentId,
+    text: String,
+) -> Result<String, ClientError> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let turn = DeliveredTurnRequest::new(
+        format!("console-smoke-{sequence}")
+            .parse()
+            .unwrap_or_else(|_| unreachable!()),
+        "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            .parse()
+            .unwrap_or_else(|_| unreachable!()),
+        DeliveryIdentity::Local {
+            transport: "console-smoke".parse().unwrap_or_else(|_| unreachable!()),
+            conversation: smoke_claim().conversation.key(),
+            boot_nonce: "0123456789abcdef0123456789abcdef".into(),
+            connection: 1,
+            sequence,
+        },
+        text,
+        DeliveredAnswer::accepted_by_transport("Recorded from console smoke".into()),
+    );
+    let attestation =
+        Attestation::for_chat(subject, agent, smoke_claim()).bound_to(turn.id.clone());
+    let result = client.record_delivered_turn(attestation, turn).await?;
+    Ok(format!(
+        "{:?}: {}",
+        result.outcome,
+        result.error.unwrap_or_default()
+    ))
+}
+
 /// Opens one agent's attested leg and snapshots what policy grants it.
 ///
 /// The snapshot comes from `capabilitiesFor`, so it is what this subject may do *through this
@@ -321,6 +377,24 @@ pub async fn open_agent(
     agent: AgentId,
     scope: Option<ChatScopeClaim>,
 ) -> Result<BrokerLeg, SessionError> {
+    open_agent_with_assets(
+        client,
+        subject,
+        agent,
+        scope,
+        Arc::new(assets::ConsoleAssets::default()),
+    )
+    .await
+}
+
+/// Open a new broker leg bound to the selected entry's inventory.
+pub async fn open_agent_with_assets(
+    client: BrokerClient,
+    subject: ExternalSubject,
+    agent: AgentId,
+    scope: Option<ChatScopeClaim>,
+    store: Arc<assets::ConsoleAssets>,
+) -> Result<BrokerLeg, SessionError> {
     let attestation = match scope {
         Some(scope) => Attestation::for_chat(subject, agent, scope),
         None => Attestation::for_subject(subject, agent),
@@ -328,14 +402,13 @@ pub async fn open_agent(
     let leg = BrokerLeg::connect(client, Some(attestation))
         .await
         .map_err(SessionError::Leg)?;
-    let store = Arc::new(assets::ConsoleAssets::default());
-    Ok(
-        leg.with_provider_attachments(Arc::new(ReplyAttachments::new(
+    Ok(leg
+        .with_provider_attachments(Arc::new(ReplyAttachments::new(
             0,
-            store,
+            store.clone(),
             "console (no delivery)".to_owned(),
-        ))),
-    )
+        )))
+        .with_chat_asset_inputs(ChatAssetInputs::new(store)))
 }
 
 /// The local leg of a console session, which is deliberately empty.
@@ -721,7 +794,7 @@ pub fn session_channel() -> (
     unbounded_channel()
 }
 
-mod assets;
+pub mod assets;
 
 #[cfg(test)]
 mod tests;

@@ -34,6 +34,7 @@ dekopon-protocol = { version = "=0.34.0", default-features = false }
 dekopon-process = { version = "=0.34.0" }
 dekopon-shell = { version = "=0.34.0" }
 dekopon-telemetry = { version = "=0.34.0", features = ["exporter"] }
+parking_lot = "0.12.5"
 opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "logs"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 prost = "0.14.3"
