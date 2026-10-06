@@ -1,5 +1,12 @@
 # Console changelog
 
+## 0.9.0
+
+- Add console-only decoded asset intake and reuse local and returned assets across legs of the same agent entry.
+- Add a broker-derived synthetic conversation flag and local delivered-turn recording.
+- Report broker denials for synthetic records as failed shell commands rather than claiming success.
+- Bind synthetic record identifiers and trace parents to the live console process and turn.
+
 ## 0.7.0
 
 - Accept broker-returned assets using published core 0.33.0 attachment APIs and a per-agent-leg, volatile 16-item / 64 MiB memory store. Print the registration ID, media type and stored byte count without claiming delivery; remove the old post-effect refusal. No durable persistence or chat transport.
