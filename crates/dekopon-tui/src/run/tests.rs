@@ -932,17 +932,21 @@ async fn smoke_record_uses_existing_frame_and_binds_invocation() {
     )
     .unwrap();
     let response = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut stream = dekopon_broker_protocol::DescriptorStream::new(stream);
-        let (request, _) = stream
-            .read_frame::<Value>(FrameLimits::default())
-            .await
-            .unwrap();
-        stream
-            .write_frame(&refusal_frame(), &[], FrameLimits::default())
-            .await
-            .unwrap();
-        request
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = dekopon_broker_protocol::DescriptorStream::new(stream);
+            let (request, _) = stream
+                .read_frame::<Value>(FrameLimits::default())
+                .await
+                .unwrap();
+            stream
+                .write_frame(&refusal_frame(), &[], FrameLimits::default())
+                .await
+                .unwrap();
+            requests.push(request);
+        }
+        requests
     });
     let result = crate::session::smoke_record(
         &client,
@@ -952,15 +956,33 @@ async fn smoke_record_uses_existing_frame_and_binds_invocation() {
     )
     .await;
     assert!(result.is_err());
-    let request = response.await.unwrap();
-    let wire = request["request"].to_string();
-    assert!(wire.contains("recordDeliveredTurn"), "{wire}");
-    assert!(wire.contains("console-smoke"), "{wire}");
-    assert!(wire.contains("marker"), "{wire}");
+    let second = crate::session::smoke_record(
+        &client,
+        "slack.t0123abc.u9xyz".parse().unwrap(),
+        "ville-github".parse().unwrap(),
+        "second".into(),
+    )
+    .await;
+    assert!(second.is_err());
+    let requests = response.await.unwrap();
+    for request in &requests {
+        let wire = request["request"].to_string();
+        assert!(wire.contains("recordDeliveredTurn"), "{wire}");
+        assert!(wire.contains("console-smoke"), "{wire}");
+        assert_eq!(
+            request["request"]["attestation"]["invocation"],
+            request["request"]["turn"]["id"]
+        );
+    }
+    let turn = |index: usize| &requests[index]["request"]["turn"];
+    assert_eq!(turn(0)["user"], "marker");
+    assert_eq!(turn(1)["user"], "second");
+    assert_ne!(turn(0)["id"], turn(1)["id"]);
     assert_eq!(
-        request["request"]["attestation"]["invocation"],
-        request["request"]["turn"]["id"]
+        turn(0)["delivery"]["bootNonce"],
+        turn(1)["delivery"]["bootNonce"]
     );
+    assert_ne!(turn(0)["traceParent"], turn(1)["traceParent"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

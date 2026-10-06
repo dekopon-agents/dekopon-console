@@ -6,9 +6,40 @@ use dekopon_shell::CapabilityInvoker as _;
 use serde_json::json;
 
 use super::{
-    CONSOLE_AUTH_FILE_NAME, NoDirect, SessionError, StopFlag, guard_shared_credential,
-    resolve_console_credential, smoke_claim,
+    CONSOLE_AUTH_FILE_NAME, NoDirect, SessionError, SmokeIdentity, StopFlag,
+    guard_shared_credential, resolve_console_credential, smoke_claim,
 };
+
+#[test]
+fn synthetic_records_have_live_traces_and_process_scoped_identity() {
+    let first_parent = dekopon_agent::session_trace_parent();
+    let second_parent = dekopon_agent::session_trace_parent();
+    let third_parent = dekopon_agent::session_trace_parent();
+    let process_a = SmokeIdentity::new(first_parent.trace_id());
+    let process_b = SmokeIdentity::new(third_parent.trace_id());
+    let first = process_a.turn(first_parent, "first".into());
+    let second = process_a.turn(second_parent, "second".into());
+    let other = process_b.turn(third_parent, "other".into());
+    assert_eq!(first.trace_parent, first_parent);
+    assert_eq!(second.trace_parent, second_parent);
+    assert_eq!(other.trace_parent, third_parent);
+    assert_ne!(
+        first.trace_parent.trace_id(),
+        second.trace_parent.trace_id()
+    );
+    assert_ne!(
+        second.trace_parent.trace_id(),
+        other.trace_parent.trace_id()
+    );
+    assert_ne!(first.id, second.id);
+    assert_ne!(first.id, other.id);
+    let nonce = |turn: &dekopon_broker_protocol::DeliveredTurnRequest| match &turn.delivery {
+        dekopon_broker_protocol::DeliveryIdentity::Local { boot_nonce, .. } => boot_nonce.clone(),
+        _ => panic!("record must use Local"),
+    };
+    assert_eq!(nonce(&first), nonce(&second));
+    assert_ne!(nonce(&first), nonce(&other));
+}
 
 #[test]
 fn smoke_claim_is_exact_reserved_literal() {

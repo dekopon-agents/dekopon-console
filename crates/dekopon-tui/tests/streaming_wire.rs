@@ -1,7 +1,8 @@
 //! Always-run wire witness: console wrappers over the pinned broker client's real FD transport.
 #![cfg(unix)]
 use dekopon_broker_protocol::{
-    BrokerClient, CommandRunOutcome, DescriptorStream, FrameLimits, ResponseEnvelope,
+    AssetEncoding, BrokerClient, CommandRunOutcome, DescriptorStream, FrameLimits, NewAsset,
+    ResponseEnvelope,
 };
 use dekopon_core::SecretUseProposal;
 use dekopon_shell::{
@@ -9,7 +10,7 @@ use dekopon_shell::{
 };
 use dekopon_tui::{
     record::{CallOutcome, RecordingInvoker, Sequence, SessionEvent},
-    session::{LegHandle, open_agent},
+    session::{LegHandle, assets::ConsoleAssets, open_agent, open_agent_with_assets},
 };
 use serde_json::{Value, json};
 use std::{
@@ -17,6 +18,166 @@ use std::{
     os::unix::{fs::PermissionsExt as _, net::UnixStream},
     sync::Arc,
 };
+
+#[tokio::test(flavor = "multi_thread")]
+async fn returned_asset_crosses_shell_legs_only_within_one_agent_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = dir.path().join("broker.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let server = tokio::spawn(async move {
+        for (operation, agent) in [
+            ("capabilities", "reviewer"),
+            ("invoke", "reviewer"),
+            ("capabilities", "reviewer"),
+            ("invoke", "reviewer"),
+            ("capabilities", "reviewer"),
+            ("capabilities", "other-agent"),
+        ] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut wire = DescriptorStream::new(stream);
+            let (frame, descriptors) = wire
+                .read_frame::<Value>(FrameLimits::default())
+                .await
+                .unwrap();
+            let request = &frame["request"];
+            assert_eq!(request["operation"], operation);
+            assert_eq!(request["attestation"]["agent"], agent);
+            let mut attachment = None;
+            let response = if operation == "capabilities" {
+                assert!(descriptors.is_empty());
+                ResponseEnvelope::capabilities(vec![serde_json::from_value(json!({
+                    "provider":"probe", "capability": {"id":"probe.read", "description":"read bytes", "effect":"read-only", "risk":"Low", "inputSchema":{"type":"object"}}
+                })).unwrap()], vec![], Default::default())
+            } else if request["invocation"]["input"] == json!({"mode":"attach"}) {
+                assert_eq!(descriptors.len(), 1, "first leg has stdout only");
+                let mut file = tempfile::tempfile().unwrap();
+                file.write_all(&[0, 1, 2, 255]).unwrap();
+                attachment = Some(file);
+                ResponseEnvelope::invocation(serde_json::from_value(json!({
+                    "invocation":request["invocation"]["id"],
+                    "decision":{"decisionId":"asset-test", "authorizedBy":"broker", "policyRevision":"test"},
+                    "outcome":"Succeeded"
+                })).unwrap(), vec![NewAsset { descriptor:0, content_type:"image/heic".into(), encoding:AssetEncoding::Identity, bytes:4, sha256:String::new() }], vec![], vec![])
+            } else {
+                assert_eq!(
+                    request["invocation"]["input"],
+                    json!({"file":"chat-asset:1"})
+                );
+                let rows = &request["assets"];
+                assert_eq!(rows[0]["contentType"], "image/heic");
+                assert_eq!(rows[0]["encoding"], "identity");
+                assert_eq!(rows[0]["id"], 1);
+                assert_eq!(descriptors.len(), 2, "asset and stdout, not inline bytes");
+                let mut bytes = [0; 4];
+                use std::os::unix::fs::FileExt as _;
+                std::fs::File::from(descriptors.into_iter().next().unwrap())
+                    .read_exact_at(&mut bytes, 0)
+                    .unwrap();
+                assert_eq!(bytes, [0, 1, 2, 255]);
+                ResponseEnvelope::invocation(serde_json::from_value(json!({
+                    "invocation":request["invocation"]["id"],
+                    "decision":{"decisionId":"asset-test", "authorizedBy":"broker", "policyRevision":"test"},
+                    "outcome":"Failed", "exitStatus":141
+                })).unwrap(), vec![], vec![], vec![])
+            };
+            let descriptors: Vec<std::os::fd::OwnedFd> =
+                attachment.into_iter().map(Into::into).collect();
+            use std::os::fd::AsFd as _;
+            let borrowed: Vec<_> = descriptors.iter().map(|fd| fd.as_fd()).collect();
+            wire.write_frame(&response, &borrowed, FrameLimits::default())
+                .await
+                .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "refused IDs must not reach broker"
+        );
+    });
+    let client = BrokerClient::new(
+        &socket,
+        rustix::process::geteuid().as_raw(),
+        FrameLimits::default(),
+    )
+    .unwrap();
+    let subject: dekopon_core::ExternalSubject = "slack.t0123abc.u9xyz".parse().unwrap();
+    let agent: dekopon_core::AgentId = "reviewer".parse().unwrap();
+    let inventory = Arc::new(ConsoleAssets::default());
+    let first = open_agent_with_assets(
+        client.clone(),
+        subject.clone(),
+        agent.clone(),
+        None,
+        inventory.clone(),
+    )
+    .await
+    .unwrap();
+    let invoke = |leg: dekopon_agent::BrokerLeg, input: Value| {
+        let (stdout, _reader) = UnixStream::pair().unwrap();
+        LegHandle(Arc::new(leg)).invoke(
+            CommandProposal::new("probe.read", input, None),
+            Streams {
+                stdin: None,
+                stdout: stdout.into(),
+            },
+            &dekopon_shell::TreeContext::new(
+                dekopon_shell::Limits::default(),
+                dekopon_shell::CallBudget::new(4),
+            ),
+        )
+    };
+    let first_result = tokio::task::spawn_blocking(move || invoke(first, json!({"mode":"attach"})))
+        .await
+        .unwrap();
+    assert!(
+        matches!(first_result, CapabilityCallResult::SucceededWithStderr(note) if note.contains("chat-asset:1") && note.contains("image/heic"))
+    );
+    let second = open_agent_with_assets(
+        client.clone(),
+        subject.clone(),
+        agent.clone(),
+        None,
+        inventory,
+    )
+    .await
+    .unwrap();
+    let result =
+        tokio::task::spawn_blocking(move || invoke(second, json!({"file":"chat-asset:1"})))
+            .await
+            .unwrap();
+    assert!(matches!(result, CapabilityCallResult::Exited { status, .. } if status.get() == 141));
+    let reentered = open_agent_with_assets(
+        client.clone(),
+        subject.clone(),
+        agent,
+        None,
+        Arc::new(ConsoleAssets::default()),
+    )
+    .await
+    .unwrap();
+    let other = open_agent_with_assets(
+        client,
+        subject,
+        "other-agent".parse().unwrap(),
+        None,
+        Arc::new(ConsoleAssets::default()),
+    )
+    .await
+    .unwrap();
+    for stale in [reentered, other] {
+        let result =
+            tokio::task::spawn_blocking(move || invoke(stale, json!({"file":"chat-asset:1"})))
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, CapabilityCallResult::Denied { reason } if reason.contains("no attachment"))
+        );
+    }
+    server.await.unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn console_forwards_attestation_secret_intent_and_descriptors_not_inline_stdio() {
