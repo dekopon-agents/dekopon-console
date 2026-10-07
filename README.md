@@ -2,7 +2,7 @@
 
 Console 0.9.0 targets dekopon 0.35.0 (synthetic smoke and same-entry assets); console 0.8.0 targets dekopon 0.34.0 (gateway rename); console 0.7.0 targets dekopon 0.33.0 (bounded ephemeral provider-asset intake); console 0.6.0 targets dekopon 0.33.0 (broker child-script upcalls); console 0.5.0 targets dekopon 0.31.0 (streaming broker and catalog); console 0.4.0 targets 0.26, 0.3.0 is the last release for 0.22, and 0.1.0 the last for 0.19.
 
-An operator-controlled interactive client of `dekopon-brokerd`. The broker alone maps subjects, authenticates the Unix peer UID, checks `agent.prompt` and provider grants, and holds provider credentials. Whoever can exec arbitrary code as the console UID can claim any subject/scope inside its broker attestor envelope; the profile picker is convenience, not authorization or Kubernetes user attribution.
+An operator-controlled interactive client of `dekopon-brokerd`. The broker alone maps subjects, authenticates the Unix peer UID, checks `agent.prompt` and provider grants, and holds provider credentials. The broker refuses real conversation claims from the authenticated console peer; whoever can exec arbitrary code as the console UID can still propose subjects inside its broker attestor envelope; the profile picker is convenience, not authorization or Kubernetes user attribution.
 
 ## Install
 
@@ -44,7 +44,7 @@ Interactive commands need stdin/stdout TTY (`kubectl exec -it`). A missing broke
 
 ### Authored profiles
 
-This strict YAML or JSON document is **read-only, credential-free operator data**. Only `defaultProfile`, when explicitly present, selects the bare invocation's subject; bare launch still opens the picker. `--profile` selects a bound agent and may not be combined with `--subject`. `--agent` selects an exact catalog name; if multiple profiles bind it, pass `--profile`. A profile bound to another agent is a refusal. Without an authored default/selected profile, an explicit `--subject` (or `DEKOPON_CONSOLE_SUBJECT`) is required. Unknown keys, duplicate names, unknown catalog agents, invalid scope, zero or excessive limits refuse before broker/model setup. Profile names use ASCII letters/digits/`-`/`_`; `maxSteps` is 1–64 and `maxCapabilityCalls` is 1–256. CLI `--model`, `--max-steps`, `--max-capability-calls` override profile fields; then the fallback is model `gpt-5.6-luna`, 8 steps, 16 calls. The selected model is always visible in the header. Keep the full credential-free catalog and referenced skill paths available; the catalog loader refuses missing skills.
+This strict YAML or JSON document is **read-only, credential-free operator data**. Only `defaultProfile`, when explicitly present, selects the bare invocation's subject; bare launch still opens the picker. `--profile` selects a bound agent and may not be combined with `--subject`. `--agent` selects an exact catalog name; if multiple profiles bind it, pass `--profile`. A profile bound to another agent is a refusal. Without an authored default/selected profile, an explicit `--subject` (or `DEKOPON_CONSOLE_SUBJECT`) is required. Unknown keys, duplicate names, unknown catalog agents, zero or excessive limits refuse before broker/model setup. Profile names use ASCII letters/digits/`-`/`_`; `maxSteps` is 1–64 and `maxCapabilityCalls` is 1–256. CLI `--model`, `--max-steps`, `--max-capability-calls` override profile fields; then the fallback is model `gpt-5.6-luna`, 8 steps, 16 calls. The selected model is always visible in the header. Keep the full credential-free catalog and referenced skill paths available; the catalog loader refuses missing skills.
 
 ```yaml
 defaultProfile: family-channel
@@ -52,17 +52,12 @@ profiles:
   - name: family-channel
     agent: lange-family
     subject: slack.t0123abc.u9xyz
-    scope: # exact published ChatScopeClaim shape; no parallel scope grammar
-      transport: operator
-      kind: slack
-      conversation: {kind: directMessage, container: t0123abc, id: d0123abc}
-      trigger: message
     model: gpt-5.6-luna
     maxSteps: 8
     maxCapabilityCalls: 16
 ```
 
-**Requested scope is not broker-confirmed.** The broker wire does not echo authenticated chat scope. Since 0.22 there are no attestor `chatScopes`: a canonical scope binds Cedar's `context.transport`/`context.conversation`, and narrowing by conversation is written in policy (`unless { context has conversation && context.conversation.id != "…" }`). A scope must carry `trigger: message`; the console cannot attest that route context itself. The console displays an explicit confirmation before scoped entry and marks the header REQUESTED. A route-context deployment must make Cedar fail closed for the console `via` when the conversation is absent or wrong. Do not reuse the gateway's UID or spoof its `via`.
+Authored profiles cannot set conversation scope; an old `scope` key is refused. Only `--smoke-conversation` selects broker-derived synthetic memory. Real chat scope belongs to the authenticated gateway, not the console. Do not reuse the gateway's UID or spoof its `via`.
 
 ### Model and data limits
 

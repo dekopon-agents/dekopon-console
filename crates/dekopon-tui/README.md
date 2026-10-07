@@ -14,7 +14,7 @@ Every drawn field passes through terminal-control sanitization. The manual shell
 |---|---|
 | `tab` / `shift-tab` | next / previous pane |
 | `j` `k` / arrows | move agent selection |
-| `enter` | enter selected agent (confirm requested scope when prompted); in shell, run command |
+| `enter` | enter selected agent; in shell, run command |
 | `i` | resume typing in shell after leaving input |
 | `page up` / `page down` | page wrapped shell rows, including while typing |
 | `home` / `end` | jump to beginning / follow bottom of shell transcript |

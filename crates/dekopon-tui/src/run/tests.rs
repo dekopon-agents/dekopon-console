@@ -245,22 +245,6 @@ fn cancelled_running_event_loop_restores_pty_after_join() {
 }
 
 #[test]
-fn scoped_claim_requires_an_explicit_confirmation_before_enter() {
-    let mut app = console();
-    app.mode = Mode::ScopeWarning;
-    let stop = StopFlag::default();
-    assert_eq!(on_key(&mut app, press(KeyCode::Char('q')), &stop), None);
-    assert!(!app.scope_warning_confirmed);
-    assert!(!app.should_quit);
-    app.mode = Mode::ScopeWarning;
-    assert_eq!(
-        on_key(&mut app, press(KeyCode::Enter), &stop),
-        Some(Action::Enter)
-    );
-    assert!(app.scope_warning_confirmed);
-}
-
-#[test]
 fn control_c_quits_from_any_mode() {
     for mode in [Mode::Browsing, Mode::Composing, Mode::Help] {
         let mut app = console();
@@ -510,7 +494,6 @@ async fn switching_profiles_clears_the_model_replay_and_visible_history() {
         name: "second".into(),
         agent: "other".parse().unwrap(),
         subject: second,
-        scope: None,
         model: None,
         max_steps: None,
         max_capability_calls: None,
@@ -623,7 +606,6 @@ async fn profile_switches_preserve_cli_override_and_update_model_provenance() {
         name: "authored".into(),
         agent: "reviewer".parse().unwrap(),
         subject: options.subject.clone(),
-        scope: None,
         model: Some("profile-model".into()),
         max_steps: None,
         max_capability_calls: None,

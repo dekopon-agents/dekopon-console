@@ -225,7 +225,7 @@ fn profile_fixture(text: &str) -> (TempDir, std::path::PathBuf, std::path::PathB
     (dir, catalog, profiles)
 }
 
-const PROFILE: &str = "defaultProfile: family\nprofiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    scope:\n      kind: slack\n      transport: operator\n      conversation: {kind: directMessage, container: t0123abc, id: d0123abc}\n      trigger: message\n    model: test-model\n    maxSteps: 2\n    maxCapabilityCalls: 3\n";
+const PROFILE: &str = "defaultProfile: family\nprofiles:\n  - name: family\n    agent: reviewer\n    subject: slack.t0123abc.u9xyz\n    model: test-model\n    maxSteps: 2\n    maxCapabilityCalls: 3\n";
 
 #[test]
 fn authored_default_profile_is_accepted_without_subject_or_model_credential() {
@@ -342,6 +342,23 @@ fn malformed_profile_document_and_missing_default_are_refused() {
             stderr(&output)
         );
     }
+}
+
+#[test]
+fn obsolete_profile_scope_is_refused_even_when_other_fields_are_valid() {
+    let text = format!(
+        "{PROFILE}    scope: {{kind: local, transport: console-smoke, conversation: {{kind: directMessage, id: console-smoke}}, trigger: message}}\n"
+    );
+    let (_dir, catalog, profiles) = profile_fixture(&text);
+    let output = binary()
+        .args(["--config".as_ref(), catalog.as_os_str()])
+        .args(["--profiles".as_ref(), profiles.as_os_str()])
+        .output()
+        .unwrap();
+    let message = stderr(&output);
+    assert!(message.contains("profile configuration"), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
+    assert!(!message.contains("TTY"), "{message}");
 }
 
 #[test]

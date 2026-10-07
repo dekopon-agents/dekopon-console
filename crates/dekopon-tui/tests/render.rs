@@ -79,17 +79,12 @@ fn the_status_line_shows_the_subject_and_the_credential_file() {
 }
 
 #[test]
-fn scoped_confirmation_does_not_claim_that_the_broker_validated_the_claim() {
+fn header_identifies_synthetic_session_without_claiming_real_scope() {
     let mut app = console(vec![agent("reviewer", "fixture")]);
-    app.scope_label = "operator / slack / directMessage".into();
-    app.mode = Mode::ScopeWarning;
+    app.scope_label = "console-smoke".into();
     let drawn = frame(&app);
-    for phrase in ["REQUESTED scope", "does not echo", "Enter to continue"] {
-        assert!(
-            drawn.contains(phrase),
-            "warning is missing {phrase}: {drawn}"
-        );
-    }
+    assert!(drawn.contains("session: console-smoke"), "{drawn}");
+    assert!(!drawn.contains("REQUESTED scope"), "{drawn}");
 }
 
 #[test]
