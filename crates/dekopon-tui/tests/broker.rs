@@ -337,7 +337,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         "profile: operator",
         "subject: slack.t0123abc.u9xyz",
         "console: dekopon-console",
-        "REQUESTED scope: subject-only",
+        "session: subject-only",
     ] {
         assert!(
             rendered.contains(field),

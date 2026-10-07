@@ -70,8 +70,6 @@ pub enum Mode {
     Browsing,
     /// Typing into the composer; keys are text.
     Composing,
-    /// A scoped claim needs explicit acknowledgement before broker connection.
-    ScopeWarning,
     /// The keybinding overlay is up.
     Help,
     /// The last error's full report is up.
@@ -217,8 +215,6 @@ pub struct App {
     pub broker_trace: Option<String>,
     /// Volatile inventory owned by this selected agent entry.
     pub assets: Option<std::sync::Arc<crate::session::assets::ConsoleAssets>>,
-    /// One-use acknowledgement of the requested-scope warning.
-    pub scope_warning_confirmed: bool,
     /// The most recent failure, in full; `e` reopens it.
     pub last_error: Option<ErrorReport>,
     /// First visual row of the error report pane.
@@ -260,7 +256,6 @@ impl App {
             model_source: crate::session::ModelSource::Default,
             broker_trace: None,
             assets: None,
-            scope_warning_confirmed: false,
             last_error: None,
             error_scroll: 0,
         }

@@ -42,8 +42,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
 
     if app.mode == Mode::Help {
         chrome::draw_help(frame);
-    } else if app.mode == Mode::ScopeWarning {
-        chrome::draw_scope_warning(frame, app);
     } else if app.mode == Mode::Error {
         chrome::draw_error(frame, app);
     }

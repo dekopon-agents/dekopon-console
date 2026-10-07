@@ -307,15 +307,6 @@ pub fn on_key(app: &mut App, key: KeyEvent, stop: &StopFlag) -> Option<Action> {
         app.should_quit = true;
         return None;
     }
-    if app.mode == Mode::ScopeWarning {
-        app.mode = Mode::Browsing;
-        if key.code == KeyCode::Enter {
-            app.scope_warning_confirmed = true;
-            return Some(Action::Enter);
-        }
-        app.notice = Some(Notice::info("requested scope was not opened"));
-        return None;
-    }
     if app.mode == Mode::Help {
         app.mode = Mode::Browsing;
         return None;
@@ -523,7 +514,6 @@ async fn dispatch_in_context(
                 .or_else(|| matches.first().copied())
             {
                 options.subject = profile.subject.clone();
-                options.scope = profile.scope.clone();
                 (options.model, options.model_source) = crate::session::selected_model(
                     options.model_override.as_deref(),
                     profile.model.as_deref(),
@@ -541,10 +531,8 @@ async fn dispatch_in_context(
                 )));
                 return;
             }
-            if options.smoke_conversation {
-                options.scope = Some(crate::session::smoke_claim());
-            }
-            // A hop (including a refused hop or pending scope warning) must never leave
+            options.scope = options.smoke_conversation.then(crate::session::smoke_claim);
+            // A hop (including a refused hop) must never leave
             // the prior agent usable under the newly selected subject/model.
             clear_agent_context(app, history, options.history_limits);
             app.subject = options.subject.to_string();
@@ -555,11 +543,6 @@ async fn dispatch_in_context(
                 .unwrap_or_else(|| "subject-only".into());
             app.model = options.model.clone();
             app.model_source = options.model_source;
-            if options.scope.is_some() && !app.scope_warning_confirmed {
-                app.mode = Mode::ScopeWarning;
-                return;
-            }
-            app.scope_warning_confirmed = false;
             let assets = Arc::new(crate::session::assets::ConsoleAssets::default());
             match open_agent_with_assets(
                 client.clone(),

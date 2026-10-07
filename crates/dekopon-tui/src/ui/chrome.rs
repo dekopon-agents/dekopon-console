@@ -48,7 +48,7 @@ pub fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 rustix::process::geteuid().as_raw()
             ),
         ),
-        (scope, format!("REQUESTED scope: {}", app.scope_label)),
+        (scope, format!("session: {}", app.scope_label)),
     ] {
         frame.render_widget(
             Paragraph::new(crate::redact::sanitize_line(&label)).wrap(Wrap { trim: true }),
@@ -116,31 +116,6 @@ pub fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// The credential file's own name, which is the part that says whose credential this is.
 fn credential_label(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
-}
-
-/// Confirmation for a scope claim which this broker wire cannot echo as trusted context.
-pub fn draw_scope_warning(frame: &mut Frame<'_>, app: &App) {
-    let area = centered(frame.area(), 86, 12);
-    frame.render_widget(Clear, area);
-    let text = format!(
-        "REQUESTED scope: {}\n\nThe broker protocol does not echo authenticated chat scope. Console-via Cedar must refuse absent or mismatched conversation context; verify exact grants before running a shell command.\n\nLIVE PROVIDERS — effects are real. Enter to continue; any other key to cancel.",
-        app.scope_label
-    );
-    frame.render_widget(
-        Paragraph::new(
-            text.lines()
-                .map(crate::redact::sanitize_line)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Unverified route-context claim"),
-        ),
-        area,
-    );
 }
 
 /// Draws the keybinding overlay.

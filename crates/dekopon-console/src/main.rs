@@ -273,11 +273,9 @@ fn execute(cli: &Cli, runtime: &tokio::runtime::Runtime) -> Result<(), ConsoleEr
     );
     let mut options = ConsoleOptions::new(subject.clone(), model);
     options.model_source = model_source;
-    options.scope = if cli.smoke_conversation {
-        Some(dekopon_tui::session::smoke_claim())
-    } else {
-        initial.and_then(|p| p.scope.clone())
-    };
+    options.scope = cli
+        .smoke_conversation
+        .then(dekopon_tui::session::smoke_claim);
     options.smoke_conversation = cli.smoke_conversation;
     options.profiles = document.profiles.clone();
     options.skills = catalog
@@ -386,12 +384,7 @@ fn read_profiles(path: &Path) -> Result<ProfilesDocument, ConsoleError> {
                 profile.name
             )));
         }
-        if profile.scope.as_ref().is_some_and(|scope| {
-            !scope.is_bounded()
-                || !scope
-                    .conversation
-                    .is_canonical_for(scope.kind, &profile.subject)
-        }) || profile
+        if profile
             .model
             .as_ref()
             .is_some_and(|model| model.trim().is_empty())
@@ -401,7 +394,7 @@ fn read_profiles(path: &Path) -> Result<ProfilesDocument, ConsoleError> {
                 .is_some_and(|n| !(1..=256).contains(&n))
         {
             return Err(ConsoleError::Profile(format!(
-                "invalid scope, model or bounds in profile {}",
+                "invalid model or bounds in profile {}",
                 profile.name
             )));
         }
