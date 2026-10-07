@@ -209,6 +209,24 @@ fn shell_rows(app: &App, width: u16, height: u16) -> Vec<String> {
 }
 
 #[test]
+fn completed_shell_commands_render_zero_and_nonzero_boundaries() {
+    let mut app = console(Vec::new());
+    app.pane = Pane::Shell;
+    for status in [0, 7] {
+        app.start_shell("probe".into());
+        app.finish_shell(dekopon_tui::app::ShellEntry {
+            input: "probe".into(),
+            output: "result".into(),
+            exit_code: Some(status),
+            truncated: false,
+        });
+    }
+    let drawn = shell_rows(&app, 80, 20).join("\n");
+    assert!(drawn.contains("[exit code: 0]"), "{drawn}");
+    assert!(drawn.contains("[exit code: 7]"), "{drawn}");
+}
+
+#[test]
 fn shell_command_output_and_prompt_share_one_wrapped_viewport() {
     let mut app = console(Vec::new());
     app.pane = Pane::Shell;
