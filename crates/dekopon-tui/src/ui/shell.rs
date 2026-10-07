@@ -27,12 +27,14 @@ fn lines(app: &App) -> Vec<Line<'static>> {
             }
         }
         if let Some(exit) = entry.exit_code {
-            if exit != 0 {
-                lines.push(Line::styled(
-                    format!("[exit code: {exit}]"),
-                    Style::default().fg(Theme::DENIED),
-                ));
-            }
+            lines.push(Line::styled(
+                format!("[exit code: {exit}]"),
+                Style::default().fg(if exit == 0 {
+                    Theme::READ_ONLY
+                } else {
+                    Theme::DENIED
+                }),
+            ));
             if entry.truncated {
                 lines.push(Line::styled(
                     "[output truncated by interpreter limits]",
