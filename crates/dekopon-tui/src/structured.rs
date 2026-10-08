@@ -7,19 +7,23 @@ use std::{
 
 use dekopon_agent::prompt::History;
 use dekopon_broker_protocol::BrokerClient;
-use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::{
+    io::{AsyncBufReadExt as _, BufReader},
+    task::JoinError,
+};
 
 use crate::{
     App, ConsoleExit,
     record::SessionEvent,
     redact::sanitize_line,
-    run::{Action, RunningTurn, dispatch, finish_turn},
-    session::{ConsoleOptions, StopFlag},
+    run::{Action, RunningTurn, dispatch, settle_turn},
+    session::{ConsoleOptions, SessionError, StopFlag},
 };
 
 const MAX_LINE: usize = 16 * 1024;
 const MAX_OUTPUT: usize = 64 * 1024;
 const MAX_COMMANDS: usize = 64;
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 fn nonce() -> io::Result<String> {
     let mut bytes = [0u8; 24];
@@ -93,6 +97,38 @@ async fn read_line(reader: &mut BufReader<tokio::io::Stdin>) -> io::Result<Optio
     }
 }
 
+/// Drains the turn's events to channel close, then joins it without giving up the handle.
+async fn complete(
+    app: &mut App,
+    turn: &mut RunningTurn,
+) -> Result<Result<History, SessionError>, JoinError> {
+    while let Some(event) = turn.events.recv().await {
+        if let SessionEvent::ShellFinished(entry) = event {
+            app.finish_shell(entry);
+        }
+    }
+    (&mut turn.handle).await
+}
+
+/// Stops a timed-out turn through the broker cancel, aborting it only once the grace runs out.
+async fn cancel_turn(running: &mut Option<RunningTurn>, stop: &StopFlag) {
+    let Some(turn) = running.as_mut() else {
+        return;
+    };
+    stop.request();
+    if tokio::time::timeout(CANCEL_GRACE, &mut turn.handle)
+        .await
+        .is_err()
+    {
+        turn.handle.abort();
+        if let Err(error) = (&mut turn.handle).await {
+            tracing::debug!(%error, "timed-out structured command aborted");
+        }
+    }
+    *running = None;
+    stop.reset();
+}
+
 /// Run the selected agent and accept at most 64 sequential commands. No input is echoed.
 /// READY is emitted only after a successful hop; END follows event drain and task join.
 /// # Errors
@@ -143,49 +179,48 @@ pub async fn run(
         let before = app.shell_history.len();
         app.notice = None;
         let command_deadline = Instant::now() + Duration::from_secs(120);
-        tokio::time::timeout(
+        let finished = tokio::time::timeout(
             command_deadline
                 .saturating_duration_since(Instant::now())
                 .min(deadline.saturating_duration_since(Instant::now())),
-            dispatch(
-                &mut app,
-                Action::Shell(line),
-                &client,
-                &mut options,
-                &mut running,
-                &mut history,
-                &stop,
-            ),
-        )
-        .await
-        .map_err(|_elapsed| {
-            ConsoleExit::Structured("command deadline exceeded; outcome uncertain".into())
-        })?;
-        if running.is_some() {
-            // ShellFinished is data, not completion: always drain to channel close and join.
-            while let Some(event) = tokio::time::timeout(
-                command_deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(deadline.saturating_duration_since(Instant::now())),
-                running.as_mut().expect("turn").events.recv(),
-            )
-            .await
-            .map_err(|_elapsed| ConsoleExit::Structured("command deadline exceeded".into()))?
-            {
-                if let SessionEvent::ShellFinished(entry) = event {
-                    app.finish_shell(entry);
+            async {
+                dispatch(
+                    &mut app,
+                    Action::Shell(line),
+                    &client,
+                    &mut options,
+                    &mut running,
+                    &mut history,
+                    &stop,
+                )
+                .await;
+                match running.as_mut() {
+                    Some(turn) => Some(complete(&mut app, turn).await),
+                    None => None,
                 }
+            },
+        )
+        .await;
+        match finished {
+            Ok(Some(joined)) => {
+                let shell = running.take().expect("turn").shell;
+                settle_turn(&mut app, shell, joined, &mut history, &stop);
             }
-            tokio::time::timeout(
-                command_deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(deadline.saturating_duration_since(Instant::now())),
-                finish_turn(&mut app, &mut running, &mut history, &stop),
-            )
-            .await
-            .map_err(|_elapsed| {
-                ConsoleExit::Structured("task join deadline exceeded; outcome uncertain".into())
-            })?;
+            Ok(None) => {}
+            Err(_elapsed) => {
+                cancel_turn(&mut running, &stop).await;
+                write_result(
+                    &mut out,
+                    &nonce,
+                    "timeout",
+                    "outcome unknown: the command timed out and may have run",
+                )
+                .map_err(ConsoleExit::Terminal)?;
+                return Err(ConsoleExit::Structured(
+                    "command deadline exceeded; outcome uncertain; remaining commands refused"
+                        .into(),
+                ));
+            }
         }
         let entry = app.shell_history.get(before);
         let status = match entry.and_then(|e| e.exit_code) {

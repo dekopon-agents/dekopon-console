@@ -237,7 +237,7 @@ async fn recv(running: &mut Option<RunningTurn>) -> Option<SessionEvent> {
 }
 
 /// Collects a finished turn's history back and reports how it ended.
-pub(crate) async fn finish_turn(
+async fn finish_turn(
     app: &mut App,
     running: &mut Option<RunningTurn>,
     history: &mut History,
@@ -246,8 +246,19 @@ pub(crate) async fn finish_turn(
     let Some(turn) = running.take() else {
         return;
     };
-    let shell = turn.shell;
-    match turn.handle.await {
+    let joined = turn.handle.await;
+    settle_turn(app, turn.shell, joined, history, stop);
+}
+
+/// Reports how a joined turn ended and releases its stop binding.
+pub(crate) fn settle_turn(
+    app: &mut App,
+    shell: bool,
+    joined: Result<Result<History, SessionError>, tokio::task::JoinError>,
+    history: &mut History,
+    stop: &StopFlag,
+) {
+    match joined {
         Ok(Ok(returned)) => *history = returned,
         // The session's own history is lost, so the model's replay window is now a guess. Saying so
         // is better than silently continuing against a window that no longer matches the screen.
