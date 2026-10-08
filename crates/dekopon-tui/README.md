@@ -1,6 +1,6 @@
 # dekopon-tui
 
-The session and rendering library for [`dekopon-console`](../../README.md). It runs a bounded `dekopon-agent` prompt loop over a `BrokerLeg` connected to an authenticated Unix peer, without broker policy, provider credentials, or a direct Wasm host. The broker decides every capability proposal; this library does not authorize subjects or tool effects. Exact published Dekopon dependency pins are `=0.35.0`.
+The session and rendering library for [`dekopon-console`](../../README.md). It runs a bounded `dekopon-agent` prompt loop over a `BrokerLeg` connected to an authenticated Unix peer, without broker policy, provider credentials, or a direct Wasm host. The broker decides every capability proposal; this library does not authorize subjects or tool effects. Exact published Dekopon dependency pins are `=0.36.0`.
 
 An agent is orchestration configuration, not a human identity. `OperatorProfile` binds an agent to a typed `ExternalSubject`; the old authored `scope` key is strictly refused. Only `--smoke-conversation` proposes a broker-derived synthetic scope. The broker must map/attest the console peer UID and authorize `agent.prompt` and its effective surface; authenticated console peers cannot attest real conversations. Neither a picker nor a profile authorizes an identity or effect.
 
