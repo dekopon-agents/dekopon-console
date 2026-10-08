@@ -102,10 +102,10 @@ fn restore() {
 }
 
 /// One turn in flight, and what the console needs back when it finishes.
-struct RunningTurn {
-    events: UnboundedReceiver<SessionEvent>,
-    handle: tokio::task::JoinHandle<Result<History, SessionError>>,
-    shell: bool,
+pub(crate) struct RunningTurn {
+    pub(crate) events: UnboundedReceiver<SessionEvent>,
+    pub(crate) handle: tokio::task::JoinHandle<Result<History, SessionError>>,
+    pub(crate) shell: bool,
 }
 
 /// Runs the console until the operator quits.
@@ -237,7 +237,7 @@ async fn recv(running: &mut Option<RunningTurn>) -> Option<SessionEvent> {
 }
 
 /// Collects a finished turn's history back and reports how it ended.
-async fn finish_turn(
+pub(crate) async fn finish_turn(
     app: &mut App,
     running: &mut Option<RunningTurn>,
     history: &mut History,
@@ -440,7 +440,7 @@ fn clear_agent_context(app: &mut App, history: &mut History, limits: HistoryLimi
     *history = History::new(limits);
 }
 
-async fn dispatch(
+pub(crate) async fn dispatch(
     app: &mut App,
     action: Action,
     client: &BrokerClient,
@@ -856,6 +856,9 @@ pub enum ConsoleExit {
     /// The terminal itself failed.
     #[error("the terminal could not be driven")]
     Terminal(#[source] io::Error),
+    /// Structured session could not safely continue.
+    #[error("structured console: {0}")]
+    Structured(String),
     /// Setting up the session layer failed before the console could open.
     #[error(transparent)]
     Session(SessionError),

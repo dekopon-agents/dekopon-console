@@ -22,6 +22,7 @@ pub mod redact;
 pub mod report;
 pub mod run;
 pub mod session;
+pub mod structured;
 pub mod transcript;
 pub mod ui;
 
