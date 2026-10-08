@@ -438,18 +438,19 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         "namespace denied"
     );
     let allowed_scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d0123abc"},"trigger":"message"}"#).expect("typed scope");
-    assert_eq!(
-        open_agent(
-            client.clone(),
-            subject.clone(),
-            "reviewer".parse().unwrap(),
-            Some(allowed_scope)
-        )
-        .await
-        .expect("allowed scope")
-        .effective_capabilities()
-        .len(),
-        1
+    let real_scope_refusal = open_agent(
+        client.clone(),
+        subject.clone(),
+        "reviewer".parse().unwrap(),
+        Some(allowed_scope),
+    )
+    .await
+    .err()
+    .expect("authenticated console cannot attest a real conversation");
+    assert!(
+        format!("{real_scope_refusal:?}")
+            .contains("dekopon sandbox: console sessions cannot attest a real conversation"),
+        "real-scope refusal must be actionable at the broker boundary: {real_scope_refusal:?}"
     );
     let wrong_scope: ChatScopeClaim = serde_json::from_str(r#"{"transport":"operator","kind":"slack","conversation":{"kind":"directMessage","container":"t0123abc","id":"d9999xyz"},"trigger":"message"}"#).expect("typed scope");
     assert!(
@@ -461,7 +462,7 @@ async fn published_client_against_real_broker_allows_only_attested_agent_surface
         )
         .await
         .is_err(),
-        "out-of-grant conversation denied"
+        "console cannot attest any real conversation, even one outside its grant"
     );
     let wrong = BrokerClient::new(&fixture.socket, uid + 1, FrameLimits::default())
         .expect("path validated");

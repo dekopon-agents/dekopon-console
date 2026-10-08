@@ -1,5 +1,11 @@
 # Console changelog
 
+## 0.10.0
+
+- Reject authored conversation scopes in console profiles; keep synthetic smoke conversations available without claiming authority over real conversations.
+- Show completion status for successful shell commands as well as failures.
+- Target published Dekopon 0.36.0 with exact crates.io pins for all ten authored core dependencies.
+
 ## 0.9.0
 
 - Add console-only decoded asset intake and reuse local and returned assets across legs of the same agent entry.
