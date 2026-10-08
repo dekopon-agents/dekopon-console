@@ -748,6 +748,60 @@ fn structured_fixture_accepts_exactly_64_completed_commands() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn structured_fixture_refuses_65th_command_with_a_frame() {
+    use std::{io::Write as _, process::Stdio};
+    let Some(fixture) = pty_broker_fixture() else {
+        eprintln!("broker fixture env absent; 65-command boundary not exercised");
+        return;
+    };
+    let (_dir, config) = catalog();
+    let mut child = binary()
+        .args([
+            "--structured",
+            "--agent",
+            "reviewer",
+            "--subject",
+            "slack.t0123abc.u9xyz",
+            "--config",
+        ])
+        .arg(config)
+        .arg("--socket")
+        .arg(&fixture.socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(":smoke unknown\n".repeat(65).as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let text = stdout(&output);
+    let nonce = text.lines().next().unwrap().strip_prefix("READY ").unwrap();
+    assert_eq!(
+        text.lines()
+            .filter(|line| *line == format!("RESULT {nonce} error"))
+            .count(),
+        65
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| *line == format!("END {nonce}"))
+            .count(),
+        65
+    );
+    assert!(
+        text.contains("command limit exceeded; command not run"),
+        "{text}"
+    );
+    assert!(!output.status.success(), "65th submitted command must fail");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn structured_fixture_orders_local_commands_and_ends_at_eof() {
     use std::{io::Write as _, process::Stdio};
     let Some(fixture) = pty_broker_fixture() else {

@@ -386,6 +386,48 @@ fn validate_terminal(cli: &Cli, stdin_tty: bool, stdout_tty: bool) -> Result<(),
 mod mode_tests {
     use super::*;
     #[test]
+    fn blocking_worker_cannot_hold_structured_process_open() {
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "DEKOPON_SHUTDOWN_TIMEOUT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (started, ready) = tokio::sync::oneshot::channel();
+                tokio::task::spawn_blocking(move || {
+                    assert!(started.send(()).is_ok());
+                    std::thread::sleep(Duration::from_secs(2)); // deliberately ignores cancel
+                });
+                ready.await.unwrap();
+            });
+            // The same shutdown path run_console invokes after flushing END and telemetry.
+            shutdown_console_runtime(runtime, true, Duration::from_millis(20));
+            return;
+        }
+        let start = Instant::now();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "mode_tests::blocking_worker_cannot_hold_structured_process_open",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(700),
+            "blocking worker held process open: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
     fn all_tty_combinations_are_explicit() {
         let default = Cli::parse_from(["console"]);
         let structured = Cli::parse_from(["console", "--structured"]);
@@ -479,7 +521,23 @@ fn run_console(cli: &Cli) -> Result<(), ConsoleError> {
     let shutdown = telemetry
         .shutdown()
         .map_err(|_sensitive_error| telemetry::TelemetryError::Shutdown);
+    drop(_entered);
+    // A timed-out structured shell may leave unabortable spawn_blocking work behind. The
+    // RESULT/END has already been flushed; do not let runtime Drop wait for that worker forever.
+    shutdown_console_runtime(runtime, cli.structured, std::time::Duration::from_secs(5));
     result?;
     shutdown?;
     Ok(())
+}
+
+fn shutdown_console_runtime(
+    runtime: tokio::runtime::Runtime,
+    structured: bool,
+    grace: std::time::Duration,
+) {
+    if structured {
+        runtime.shutdown_timeout(grace);
+    } else {
+        drop(runtime);
+    }
 }
