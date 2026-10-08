@@ -66,9 +66,46 @@ fn help_lists_every_flag_a_deployment_might_need() {
         "--telemetry",
         "--socket",
         "--server-uid",
+        "--structured",
     ] {
         assert!(help.contains(flag), "{flag} is undocumented: {help}");
     }
+}
+
+#[test]
+fn structured_requires_both_streams_non_tty_and_reaches_catalog() {
+    let output = binary()
+        .args([
+            "--structured",
+            "--subject",
+            "slack.t0123abc.u9xyz",
+            "--agent",
+            "reviewer",
+            "--config",
+            "/nonexistent/catalog.yaml",
+        ])
+        .output()
+        .expect("binary starts");
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("catalog") || stderr(&output).contains("No such file"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stderr(&output).contains("TTY"));
+}
+
+#[test]
+fn default_non_tty_refusal_and_structured_idle_conflict() {
+    let (_dir, config) = catalog();
+    let output = binary()
+        .args(["--subject", "slack.t0123abc.u9xyz", "--config"])
+        .arg(config)
+        .output()
+        .unwrap();
+    assert!(stderr(&output).contains("TTY"));
+    let output = binary().args(["--structured", "--idle"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -621,6 +658,62 @@ fn exact_agent_enters_real_broker_session_while_omitted_agent_stays_in_picker() 
         !picker.contains("reviewer:"),
         "bare selection opened a leg without picker action"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn structured_fixture_orders_local_commands_and_ends_at_eof() {
+    use std::{io::Write as _, process::Stdio};
+    let Some(fixture) = pty_broker_fixture() else {
+        eprintln!("broker fixture env absent; structured integration not exercised");
+        return;
+    };
+    let (_dir, config) = catalog();
+    let mut child = binary()
+        .args([
+            "--structured",
+            "--agent",
+            "reviewer",
+            "--subject",
+            "slack.t0123abc.u9xyz",
+            "--config",
+        ])
+        .arg(config)
+        .args(["--socket"])
+        .arg(&fixture.socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b":smoke unknown\n:asset unknown\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<_> = text.lines().collect();
+    let nonce = lines[0].strip_prefix("READY ").unwrap();
+    assert_eq!(nonce.len(), 48);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|s| **s == format!("RESULT {nonce} error"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|s| **s == format!("END {nonce}"))
+            .count(),
+        2
+    );
+    assert!(!text.contains(":smoke unknown"));
+    assert!(!text.contains(":asset unknown"));
 }
 
 #[test]

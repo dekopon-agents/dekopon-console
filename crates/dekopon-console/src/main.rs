@@ -127,6 +127,10 @@ struct Cli {
     #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=256))]
     max_capability_calls: Option<u32>,
 
+    /// Bounded non-TTY command/result transport (requires both stdin and stdout non-TTY).
+    #[arg(long, conflicts_with = "idle")]
+    structured: bool,
+
     /// Disable ANSI colors in diagnostics.
     #[arg(long)]
     no_color: bool,
@@ -164,6 +168,10 @@ enum ConsoleError {
     UnknownAgent(AgentId),
     #[error("the interactive console needs a TTY on stdin and stdout (use kubectl exec -it)")]
     NoTerminal,
+    #[error("--structured requires both stdin and stdout to be non-TTY")]
+    StructuredTerminal,
+    #[error("--structured requires --agent or a selected --profile")]
+    StructuredAgent,
 }
 
 fn main() -> ExitCode {
@@ -262,8 +270,9 @@ fn execute(cli: &Cli, runtime: &tokio::runtime::Runtime) -> Result<(), ConsoleEr
         .map(|p| p.subject.clone())
         .or_else(|| cli.subject.clone())
         .ok_or(ConsoleError::NoSubject)?;
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err(ConsoleError::NoTerminal);
+    validate_terminal(cli, io::stdin().is_terminal(), io::stdout().is_terminal())?;
+    if cli.structured && cli.agent.is_none() && initial.is_none() {
+        return Err(ConsoleError::StructuredAgent);
     }
     let agents = catalog.agents().cloned().collect();
 
@@ -354,8 +363,43 @@ fn execute(cli: &Cli, runtime: &tokio::runtime::Runtime) -> Result<(), ConsoleEr
         .unwrap_or_else(|| "subject-only".into());
     app.model = options.model.clone();
     app.model_source = options.model_source;
-    runtime.block_on(dekopon_tui::run(app, client, options))?;
+    if cli.structured {
+        runtime.block_on(dekopon_tui::structured::run(app, client, options))?;
+    } else {
+        runtime.block_on(dekopon_tui::run(app, client, options))?;
+    }
     Ok(())
+}
+
+fn validate_terminal(cli: &Cli, stdin_tty: bool, stdout_tty: bool) -> Result<(), ConsoleError> {
+    if cli.structured {
+        if stdin_tty || stdout_tty {
+            return Err(ConsoleError::StructuredTerminal);
+        }
+    } else if !stdin_tty || !stdout_tty {
+        return Err(ConsoleError::NoTerminal);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    #[test]
+    fn all_tty_combinations_are_explicit() {
+        let default = Cli::parse_from(["console"]);
+        let structured = Cli::parse_from(["console", "--structured"]);
+        for (stdin, stdout) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(
+                validate_terminal(&default, stdin, stdout).is_ok(),
+                stdin && stdout
+            );
+            assert_eq!(
+                validate_terminal(&structured, stdin, stdout).is_ok(),
+                !stdin && !stdout
+            );
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
