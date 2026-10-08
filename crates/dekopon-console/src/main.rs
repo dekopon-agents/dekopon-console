@@ -271,7 +271,7 @@ fn execute(cli: &Cli, runtime: &tokio::runtime::Runtime) -> Result<(), ConsoleEr
         .or_else(|| cli.subject.clone())
         .ok_or(ConsoleError::NoSubject)?;
     validate_terminal(cli, io::stdin().is_terminal(), io::stdout().is_terminal())?;
-    if cli.structured && cli.agent.is_none() && initial.is_none() {
+    if cli.structured && cli.agent.is_none() && cli.profile.is_none() {
         return Err(ConsoleError::StructuredAgent);
     }
     let agents = catalog.agents().cloned().collect();
