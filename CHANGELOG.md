@@ -1,5 +1,12 @@
 # Console changelog
 
+## 0.11.0
+
+- Added: Explicit nonce-framed non-TTY shell output for console sessions.
+- Changed: Require explicit agent selection and accept 64 completed structured commands.
+- Changed: Cover structured timeout framing, cancellation and task ownership.
+- Changed: Bound structured timeout shutdown and frame excess-command refusal.
+
 ## 0.10.0
 
 - Reject authored conversation scopes in console profiles; keep synthetic smoke conversations available without claiming authority over real conversations.
