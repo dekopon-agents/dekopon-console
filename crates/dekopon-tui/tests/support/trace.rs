@@ -122,7 +122,7 @@ impl Loopback {
                         let first = data.model_requests.len() % 2 == 0;
                         data.model_requests.push(request);
                         let message = if first {
-                            json!({"role":"assistant", "content":null, "tool_calls":[{"id":"synthetic-call", "type":"function", "function":{"name":"bash", "arguments":json!({"script":"probe upper --text synthetic-payload"}).to_string()}}]})
+                            json!({"role":"assistant", "content":null, "tool_calls":[{"id":"synthetic-call", "type":"function", "function":{"name":"bash", "arguments":json!({"command":"probe upper --text synthetic-payload"}).to_string()}}]})
                         } else {
                             json!({"role":"assistant", "content":"synthetic-answer"})
                         };
