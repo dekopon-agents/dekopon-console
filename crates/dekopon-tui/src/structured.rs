@@ -253,6 +253,28 @@ async fn run_with_limits<R: AsyncRead + Unpin, W: io::Write>(
         );
         write_result(&mut out, &nonce, status, message).map_err(ConsoleExit::Terminal)?;
     }
+    // Accept exactly 64 completed commands, but never silently drop a 65th submitted line.
+    // EOF is success; a further newline-terminated command receives its own refusal frame.
+    if tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        read_line(&mut input),
+    )
+    .await
+    .map_err(|_elapsed| ConsoleExit::Structured("session deadline exceeded".into()))?
+    .map_err(ConsoleExit::Terminal)?
+    .is_some()
+    {
+        write_result(
+            &mut out,
+            &nonce,
+            "error",
+            "command limit exceeded; command not run",
+        )
+        .map_err(ConsoleExit::Terminal)?;
+        return Err(ConsoleExit::Structured(
+            "session command limit exceeded".into(),
+        ));
+    }
     Ok(())
 }
 
