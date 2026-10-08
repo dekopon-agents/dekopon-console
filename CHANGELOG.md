@@ -1,5 +1,9 @@
 # Console changelog
 
+## 0.12.0
+
+- Changed: Target published Dekopon 0.37.0 with exact crates.io pins for all ten authored core dependencies; a 0.36 console cannot decode a 0.37 broker's capabilities answer.
+
 ## 0.11.0
 
 - Added: Explicit nonce-framed non-TTY shell output for console sessions.
