@@ -660,6 +660,92 @@ fn exact_agent_enters_real_broker_session_while_omitted_agent_stays_in_picker() 
     );
 }
 
+#[test]
+fn structured_refuses_implicit_default_profile_before_broker_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("agents.yaml");
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(&catalog, format!("{CATALOG}---\napiVersion: dekopon.dev/v1alpha1\nkind: Agent\nmetadata:\n  name: second\nspec:\n  description: Second agent\n  enabled: true\n")).unwrap();
+    std::fs::write(&profiles, "defaultProfile: second-profile\nprofiles:\n  - name: second-profile\n    agent: second\n    subject: slack.t0123abc.u9xyz\n").unwrap();
+    let output = binary()
+        .args(["--structured", "--config"])
+        .arg(catalog)
+        .arg("--profiles")
+        .arg(profiles)
+        .args([
+            "--socket",
+            "/nonexistent/broker.sock",
+            "--endpoint",
+            "http://127.0.0.1:9/v1",
+        ])
+        .output()
+        .unwrap();
+    let message = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{message}");
+    assert!(
+        message.contains("--agent") && message.contains("--profile"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("connect") && !message.contains("broker.sock"),
+        "{message}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn structured_fixture_accepts_exactly_64_completed_commands() {
+    use std::{io::Write as _, process::Stdio};
+    let Some(fixture) = pty_broker_fixture() else {
+        eprintln!("broker fixture env absent; structured boundary not exercised");
+        return;
+    };
+    let (_dir, config) = catalog();
+    let mut child = binary()
+        .args([
+            "--structured",
+            "--agent",
+            "reviewer",
+            "--subject",
+            "slack.t0123abc.u9xyz",
+            "--config",
+        ])
+        .arg(config)
+        .arg("--socket")
+        .arg(&fixture.socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(":smoke unknown\n".repeat(64).as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let text = stdout(&output);
+    let nonce = text.lines().next().unwrap().strip_prefix("READY ").unwrap();
+    assert_eq!(
+        text.lines()
+            .filter(|line| *line == format!("RESULT {nonce} error"))
+            .count(),
+        64
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| *line == format!("END {nonce}"))
+            .count(),
+        64
+    );
+    assert!(
+        output.status.success(),
+        "completed frames must close successfully: {}",
+        stderr(&output)
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn structured_fixture_orders_local_commands_and_ends_at_eof() {

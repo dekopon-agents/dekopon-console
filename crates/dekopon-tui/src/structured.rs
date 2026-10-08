@@ -202,9 +202,7 @@ pub async fn run(
         );
         write_result(&mut out, &nonce, status, message).map_err(ConsoleExit::Terminal)?;
     }
-    Err(ConsoleExit::Structured(
-        "session command limit reached".into(),
-    ))
+    Ok(())
 }
 
 #[cfg(test)]
